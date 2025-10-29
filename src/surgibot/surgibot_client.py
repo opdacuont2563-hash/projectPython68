@@ -9,6 +9,7 @@ SurgiBot Client — PySide6 (revamped layout)
 
 import os, sys, json, argparse
 import math
+import time
 from pathlib import Path
 from typing import Union, List, Dict
 from datetime import datetime, timedelta, time as dtime, date as ddate
@@ -1014,6 +1015,25 @@ class Main(QtWidgets.QWidget):
         self._was_in_monitor: set[str] = set()
         self._current_monitor_hn: set[str] = set()
 
+        # Connection hysteresis
+        self._conn_ok_streak = 0
+        self._conn_fail_streak = 0
+        self._conn_state: bool | None = None
+
+        # Throttled persistence & scheduled rendering
+        self._persist_timer = QtCore.QTimer(self)
+        self._persist_timer.setSingleShot(True)
+        self._persist_timer.setInterval(7000)
+        self._persist_timer.timeout.connect(lambda: self._save_persisted_monitor_state(self.rows_cache))
+
+        self._render_pending = False
+        self._render_timer = QtCore.QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(150)
+        self._render_timer.timeout.connect(self._flush_scheduled_render)
+
+        self._last_autofit_at = 0.0
+
         self.setWindowTitle("SurgiBot Client — Modern (PySide6)")
         self.resize(1440, 900)
         self._build_ui()
@@ -1034,7 +1054,9 @@ class Main(QtWidgets.QWidget):
         self._ensure_tray()
         self._refresh(prefer_server=True)
 
-        self._tick = QtCore.QTimer(self); self._tick.timeout.connect(lambda: self._rebuild(self.rows_cache)); self._tick.start(1000)
+        self._time_tick = QtCore.QTimer(self)
+        self._time_tick.timeout.connect(self._update_time_cells)
+        self._time_tick.start(1000)
         self._pull = QtCore.QTimer(self); self._pull.timeout.connect(lambda: self._refresh(True)); self._pull.start(CONFIG.client_refresh_interval_ms)
         self._sched_timer = QtCore.QTimer(self); self._sched_timer.timeout.connect(self._check_schedule_seq); self._sched_timer.start(1000)
         self._start_websocket()
@@ -1264,6 +1286,10 @@ class Main(QtWidgets.QWidget):
         hdr = tree.header()
         if hdr is None:
             return
+        now = time.monotonic()
+        if now - getattr(self, "_last_autofit_at", 0.0) < 10.0:
+            return
+        self._last_autofit_at = now
         hbar = tree.horizontalScrollBar()
         vbar = tree.verticalScrollBar()
         old_h = hbar.value() if hbar is not None else 0
@@ -1607,7 +1633,7 @@ QLabel { color:#fff; font-weight: 900; }
         QShortcut(QKeySequence("Alt+S"), self, self._on_send)
         QShortcut(QKeySequence("Alt+H"), self, self._on_health)
         QShortcut(QKeySequence("Alt+R"), self, lambda: self._refresh(True))
-        self._render_schedule_tree()
+        self._schedule_render()
 
     # ---------- Helper styles ----------
     def _update_action_styles(self):
@@ -1678,8 +1704,7 @@ QLabel { color:#fff; font-weight: 900; }
                     pass
         finally:
             self.monitor_ready = True
-            self._render_schedule_tree()
-            self._update_schedule_completion_markers()
+            self._schedule_render()
 
     def closeEvent(self, e):
         self._save_settings(); self._save_persisted_monitor_state(self.rows_cache)
@@ -1761,7 +1786,7 @@ QLabel { color:#fff; font-weight: 900; }
             entry.version = int(entry.version or 0) + 1
             entry.updated_at = datetime.now().isoformat()
             self.sched.touch_entry(entry)
-            self._render_schedule_tree()
+            self._schedule_render()
             self._flash_row_by_uid(entry.uid())
             self._set_status_combo(entry.status)
 
@@ -1855,7 +1880,7 @@ QLabel { color:#fff; font-weight: 900; }
         entry.version = int(entry.version or 0) + 1
         entry.updated_at = datetime.now().isoformat()
         self.sched.touch_entry(entry)
-        self._render_schedule_tree()
+        self._schedule_render()
         self._flash_row_by_uid(entry.uid())
         self.toast.show_toast("บันทึกหลังผ่าตัดเรียบร้อย")
 
@@ -1880,17 +1905,6 @@ QLabel { color:#fff; font-weight: 900; }
             QPushButton:hover{ background:#f59e0b; }
             """
         )
-        effect = QtWidgets.QGraphicsOpacityEffect(btn)
-        btn.setGraphicsEffect(effect)
-        anim = QtCore.QPropertyAnimation(effect, b"opacity", btn)
-        anim.setDuration(1200)
-        anim.setStartValue(0.55)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QtCore.QEasingCurve.InOutQuad)
-        anim.setLoopCount(-1)
-        anim.start()
-        btn._pulse_anim = anim  # type: ignore[attr-defined]
-        btn._pulse_effect = effect  # type: ignore[attr-defined]
         btn.clicked.connect(lambda *_: self._open_postop_by_uid(uid))
         return btn
 
@@ -1970,6 +1984,21 @@ QLabel { color:#fff; font-weight: 900; }
         text = "  • Online  " if ok else "  • Offline  "
         self.status_chip.setText(text)
         self.status_chip.setStyleSheet(f"{base}color:{color};")
+        self._conn_state = ok
+
+    def _bump_conn(self, ok: bool):
+        if ok:
+            self._conn_ok_streak += 1
+            self._conn_fail_streak = 0
+            if self._conn_state is not True and self._conn_ok_streak >= 2:
+                self._set_chip(True)
+            self._conn_ok_streak = min(self._conn_ok_streak, 3)
+        else:
+            self._conn_fail_streak += 1
+            self._conn_ok_streak = 0
+            if self._conn_state is not False and self._conn_fail_streak >= 2:
+                self._set_chip(False)
+            self._conn_fail_streak = min(self._conn_fail_streak, 3)
 
     def _client(self):
         try:
@@ -1989,12 +2018,12 @@ QLabel { color:#fff; font-weight: 900; }
 
     @QtCore.Slot(object)
     def _on_health_success(self, _payload: object):
-        self._set_chip(True)
+        self._bump_conn(True)
         QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), "Health OK")
 
     @QtCore.Slot(object)
     def _on_health_error(self, err: object):
-        self._set_chip(False)
+        self._bump_conn(False)
         QtWidgets.QMessageBox.warning(self, "เชื่อมต่อไม่ได้", "กรุณา check IP Address ให้ตรงกับเครื่อง Server ด้วยครับ")
         logger.warning("Health check failed: %s", err)
 
@@ -2193,15 +2222,52 @@ QLabel { color:#fff; font-weight: 900; }
             self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(self._render_time_cell(r)))
 
         # 4) วาดตาราง Schedule
-        self._render_schedule_tree()
-        self._update_schedule_completion_markers()
+        self._schedule_render()
 
         # 5) persist state
-        self._save_persisted_monitor_state(self.rows_cache)
+        self._schedule_persist()
+
+    def _update_time_cells(self):
+        if not getattr(self, "table", None):
+            return
+        if not self.rows_cache:
+            return
+        try:
+            by_pid: dict[str, dict] = {}
+            by_id: dict[str, dict] = {}
+            for raw in self.rows_cache:
+                pid = str(raw.get("patient_id", "")).strip()
+                rid = str(raw.get("id", "")).strip()
+                if pid:
+                    by_pid[pid] = raw
+                if rid:
+                    by_id[rid] = raw
+
+            for row_idx in range(self.table.rowCount()):
+                pid_item = self.table.item(row_idx, 1)
+                rid_item = self.table.item(row_idx, 0)
+                pid = pid_item.text().strip() if pid_item else ""
+                rid = rid_item.text().strip() if rid_item else ""
+                raw = by_pid.get(pid) or by_id.get(rid)
+                if raw is None:
+                    continue
+                new_text = self._render_time_cell(raw)
+                cell = self.table.item(row_idx, 3)
+                if cell is None:
+                    self.table.setItem(row_idx, 3, QtWidgets.QTableWidgetItem(new_text))
+                elif cell.text() != new_text:
+                    cell.setText(new_text)
+        except Exception:
+            pass
+
+    def _schedule_persist(self):
+        if self._persist_timer.isActive():
+            return
+        self._persist_timer.start()
 
     def _refresh(self, prefer_server=True):
         if not prefer_server:
-            self._set_chip(False)
+            self._bump_conn(False)
             self._rebuild(self.model.rows)
             return
 
@@ -2224,7 +2290,7 @@ QLabel { color:#fff; font-weight: 900; }
         rows = self._extract_rows(payload)
         if rows is not None:
             self._rebuild(rows)
-            self._set_chip(True)
+            self._bump_conn(True)
         else:
             self._rebuild(self.model.rows)
         if self._refresh_requested:
@@ -2233,7 +2299,7 @@ QLabel { color:#fff; font-weight: 900; }
     @QtCore.Slot(object)
     def _on_refresh_error(self, err: object):
         self._refresh_inflight = False
-        self._set_chip(False)
+        self._bump_conn(False)
         self._rebuild(self.model.rows)
         logger.warning("Refresh failed: %s", err)
         if self._refresh_requested:
@@ -2265,17 +2331,18 @@ QLabel { color:#fff; font-weight: 900; }
 
     def _ws_connected(self):
         self.ws_connected = True
-        self._set_chip(True)
+        self._bump_conn(True)
         if self._pull.isActive():
             self._pull.stop()
 
     def _ws_disconnected(self):
         self.ws_connected = False
+        self._bump_conn(False)
         if not self._pull.isActive():
             self._pull.start(2000)
 
     def _ws_error(self, err):
-        self._set_chip(False)
+        self._bump_conn(False)
         self._ws_disconnected()
 
     def _on_ws_message(self, msg: str):
@@ -2433,7 +2500,7 @@ QLabel { color:#fff; font-weight: 900; }
                 self.model.delete(eff_pid)
         else:
             self.model.add_or_edit(eff_pid, status or "", ts_iso, eta_minutes, hn=hn)
-        self._set_chip(True)
+        self._bump_conn(True)
         self._refresh(True)
         self._reset_form()
 
@@ -2453,13 +2520,26 @@ QLabel { color:#fff; font-weight: 900; }
                 self.model.delete(eff_pid)
         else:
             self.model.add_or_edit(eff_pid, status or "", ts_iso, eta_minutes, hn=hn)
-        self._set_chip(False)
+        self._bump_conn(False)
         self._refresh(False)
         self._reset_form()
         logger.warning("Send update failed: %s", getattr(err, "original", err))
 
     # ---------- Schedule ----------
 
+    def _schedule_render(self):
+        if self._render_pending:
+            return
+        self._render_pending = True
+        self._render_timer.start()
+
+    def _flush_scheduled_render(self):
+        self._render_pending = False
+        try:
+            self._render_schedule_tree()
+        finally:
+            if self.monitor_ready:
+                self._update_schedule_completion_markers()
 
     def _render_schedule_tree(self):
         """วาด Result Schedule ให้ตรงกับ Registry + เคารพสถานะพับ/ขยายของผู้ใช้"""
@@ -2576,8 +2656,6 @@ QLabel { color:#fff; font-weight: 900; }
         QtCore.QTimer.singleShot(0, self._autofit_schedule_columns)
         QtCore.QTimer.singleShot(0, self._update_or_sticky)
         QtCore.QTimer.singleShot(0, self._restore_selected_schedule_item)
-        if self.monitor_ready:
-            self._update_schedule_completion_markers()
     def _update_schedule_completion_markers(self):
         return
 
@@ -2593,7 +2671,7 @@ QLabel { color:#fff; font-weight: 900; }
 
     def _check_schedule_seq(self):
         if self.sched.refresh_if_changed():
-            self._render_schedule_tree()
+            self._schedule_render()
         # ไม่บังคับ expandAll เพื่อคงสถานะพับ/ขยายของผู้ใช้
         QtCore.QTimer.singleShot(0, self._autofit_schedule_columns)
 
