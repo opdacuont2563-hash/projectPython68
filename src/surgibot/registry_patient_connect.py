@@ -765,7 +765,7 @@ class ScheduleEntry(QtCore.QObject):
         self.hn = (hn or "").strip()
         self.name = (name or "").strip()
         self.age = int(age) if str(age).isdigit() else 0
-        self.dept = dept
+        self.dept = _canonical_department_label(dept)
         self.doctor = doctor
         self.diags = diags or []
         self.ops = ops or []
@@ -787,6 +787,7 @@ class ScheduleEntry(QtCore.QObject):
         self.returned_to_ward_at = returned_to_ward_at or ""
         self.postop_completed = bool(postop_completed)
         self.status = (status or "รอผ่าตัด").strip()
+        self.dept = infer_department_from_doctor(self.doctor, self.dept)
 
     def _gen_case_uid(self) -> str:
         base = f"{self.or_room}|{self.hn}|{self.time}|{self.date}"
@@ -1749,6 +1750,46 @@ def normalize_doctor_name(name: str) -> str:
     return DOCTOR_ALIASES.get(s, s)
 
 
+def _canonical_department_label(label: str) -> str:
+    text = (label or "").strip()
+    if not text:
+        return ""
+    mapped = _dept_to_specialty_key(text)
+    if mapped:
+        return mapped
+    if "|" in text:
+        head = text.split("|", 1)[0].strip()
+        if head:
+            return head
+    return text
+
+
+def _build_doctor_department_lookup() -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for dept_label, doctors in DEPT_DOCTORS.items():
+        canonical = _canonical_department_label(dept_label)
+        if not canonical:
+            continue
+        for name in doctors:
+            normalized = normalize_doctor_name(name)
+            if normalized and normalized not in mapping:
+                mapping[normalized] = canonical
+    return mapping
+
+
+DOCTOR_DEPT_LOOKUP: Dict[str, str] = _build_doctor_department_lookup()
+
+
+def infer_department_from_doctor(doctor_name: str, current_dept: str = "") -> str:
+    existing = _canonical_department_label(current_dept)
+    if existing:
+        return existing
+    normalized = normalize_doctor_name(doctor_name)
+    if not normalized:
+        return existing
+    return DOCTOR_DEPT_LOOKUP.get(normalized, existing)
+
+
 GROUP_MEMBER_LOOKUP: Dict[str, Set[str]] = {
     token: {normalize_doctor_name(member) for member in members}
     for token, members in GROUPS.items()
@@ -2186,6 +2227,7 @@ class Main(QtWidgets.QWidget):
         g.addWidget(self.row_doctor_label, r, 0)
         self.cb_doctor = QtWidgets.QComboBox();
         g.addWidget(self.cb_doctor, r, 1, 1, 5)
+        self.cb_doctor.currentTextChanged.connect(self._on_doctor_selected)
         r += 1
 
         g.addWidget(section_header("Diagnosis"), r, 0, 1, 6)
@@ -3493,6 +3535,42 @@ class Main(QtWidgets.QWidget):
             )
         return auto
 
+    def _on_doctor_selected(self, doctor_name: str) -> None:
+        try:
+            doctor_name = (doctor_name or "").strip()
+            if not doctor_name:
+                return
+            if not hasattr(self, "cb_dept") or self.cb_dept is None:
+                return
+            current_label = (self.cb_dept.currentText() or "").strip()
+            if current_label and not current_label.startswith("—"):
+                return
+            resolved = infer_department_from_doctor(doctor_name)
+            if not resolved:
+                return
+            target_index = -1
+            for i in range(self.cb_dept.count()):
+                text = self.cb_dept.itemText(i)
+                if not text or text.startswith("—"):
+                    continue
+                canonical = _canonical_department_label(text)
+                if canonical == resolved or text.startswith(resolved):
+                    target_index = i
+                    break
+            if target_index < 0:
+                return
+            if target_index == self.cb_dept.currentIndex():
+                return
+            with QtCore.QSignalBlocker(self.cb_dept):
+                self.cb_dept.setCurrentIndex(target_index)
+            self._on_dept_changed(self.cb_dept.currentText())
+            idx = self.cb_doctor.findText(doctor_name)
+            if idx >= 0:
+                with QtCore.QSignalBlocker(self.cb_doctor):
+                    self.cb_doctor.setCurrentIndex(idx)
+        except Exception:
+            pass
+
     def _on_dept_changed(self, dept_label: str):
         if dept_label and not dept_label.startswith("—"):
             self._set_doctor_visibility(True)
@@ -3736,11 +3814,12 @@ class Main(QtWidgets.QWidget):
         ward_text = self.cb_ward.currentText().strip()
         if ward_text == WARD_PLACEHOLDER:
             ward_text = ""
+        doctor_text = self.cb_doctor.currentText().strip() if self.cb_doctor.isVisible() else ""
         return ScheduleEntry(
             or_room=self.cb_or.currentText().strip(), dt=dt.date(), time_str=self.time.time().toString("HH:mm"),
             hn=self.ent_hn.text().strip(), name=self.ent_name.text().strip(), age=self.ent_age.text().strip() or "0",
             dept=(self.cb_dept.currentText().strip() if not self.cb_dept.currentText().startswith("—") else ""),
-            doctor=self.cb_doctor.currentText().strip() if self.cb_doctor.isVisible() else "",
+            doctor=normalize_doctor(doctor_text) if doctor_text else "",
             diags=self.diag_adder.items(), ops=self.op_adder.items(),
             ward=ward_text,
             case_size=self.cb_case.currentText().strip(),
