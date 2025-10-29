@@ -1260,17 +1260,37 @@ class ClientHTTP:
         return r.json()
 
     def list_items(self):
-        try:
-            r = self.s.get(f"{self.base}{API_LIST_FULL}?token={self.token}", timeout=self.timeout,
-                           headers={"Accept": "application/json"})
-            if r.status_code == 200: return self._wrap(r.json())
-        except Exception:
-            pass
-        try:
-            r = self.s.get(self.base + API_LIST, timeout=self.timeout, headers={"Accept": "application/json"})
-            if r.status_code == 200: return self._wrap(r.json())
-        except Exception:
-            pass
+        errors: list[Exception] = []
+        endpoints = [
+            f"{self.base}{API_LIST_FULL}?token={self.token}",
+            self.base + API_LIST,
+        ]
+        headers = {"Accept": "application/json"}
+
+        for url in endpoints:
+            try:
+                r = self.s.get(url, timeout=self.timeout, headers=headers)
+            except Exception as exc:
+                errors.append(exc)
+                continue
+
+            if r.status_code == 200:
+                try:
+                    return self._wrap(r.json())
+                except Exception as exc:
+                    errors.append(exc)
+                    continue
+
+            if r.status_code in {204, 304}:
+                return {"items": []}
+
+            try:
+                r.raise_for_status()
+            except Exception as exc:
+                errors.append(exc)
+
+        if errors:
+            raise errors[-1]
         return {"items": []}
 
     @staticmethod
@@ -1930,6 +1950,16 @@ class Main(QtWidgets.QWidget):
         self._op_search_timer.timeout.connect(self._on_op_search_timeout)
         self._latest_op_query = ""
 
+        base_refresh = int(getattr(CONFIG, "client_refresh_interval_ms", 2000) or 2000)
+        self._pull_base_interval = max(1000, base_refresh)
+        self._pull_max_interval = max(self._pull_base_interval, 60000)
+        self._refresh_fail_streak = 0
+        self._last_refresh_error: Optional[str] = None
+        self._pull_paused_for_ws = False
+        self._conn_state: Optional[bool] = None
+        self._conn_ok_streak = 0
+        self._conn_fail_streak = 0
+
         self.setWindowTitle("Registry Patient Connect — ORNBH")
         self.resize(1360, 900)
         apply_modern_theme(self)
@@ -2366,8 +2396,10 @@ class Main(QtWidgets.QWidget):
 
     def _start_timers(self):
         self._pull = QtCore.QTimer(self);
+        self._pull.setInterval(self._pull_base_interval)
         self._pull.timeout.connect(lambda: self._refresh(True));
-        self._pull.start(3000)
+        self._pull_paused_for_ws = False
+        self._pull.start()
         self._seq_timer = QtCore.QTimer(self);
         self._seq_timer.timeout.connect(self._check_seq);
         self._seq_timer.start(1000)
@@ -2376,6 +2408,15 @@ class Main(QtWidgets.QWidget):
         self._returning_cron = QtCore.QTimer(self)
         self._returning_cron.timeout.connect(self._tick_returning_cron)
         self._returning_cron.start(30_000)
+
+    def _set_pull_timer(self, interval_ms: int) -> None:
+        if not hasattr(self, "_pull") or self._pull is None:
+            return
+        interval_ms = max(1000, int(interval_ms))
+        if self._pull.interval() != interval_ms:
+            self._pull.setInterval(interval_ms)
+        if not self._pull_paused_for_ws and not self._pull.isActive():
+            self._pull.start()
 
     def _tick_returning_cron(self):
         now = datetime.now()
@@ -2503,7 +2544,29 @@ class Main(QtWidgets.QWidget):
             self._chip(False)
 
     def _chip(self, ok: bool):
+        if self._conn_state is None:
+            if ok:
+                self._conn_ok_streak = 1
+                self._conn_fail_streak = 0
+            else:
+                self._conn_ok_streak = 0
+                self._conn_fail_streak = 1
+            self._apply_chip(ok)
+            return
+
         if ok:
+            self._conn_ok_streak = min(self._conn_ok_streak + 1, 10)
+            self._conn_fail_streak = 0
+            if self._conn_state is not True and self._conn_ok_streak >= 2:
+                self._apply_chip(True)
+        else:
+            self._conn_fail_streak = min(self._conn_fail_streak + 1, 10)
+            self._conn_ok_streak = 0
+            if self._conn_state is not False and self._conn_fail_streak >= 2:
+                self._apply_chip(False)
+
+    def _apply_chip(self, online: bool) -> None:
+        if online:
             self.status_chip.setText("● Online");
             self.status_chip.setStyleSheet(
                 "color:#10b981;font-weight:800;padding:6px 10px;border:1px solid #e5e7eb;border-radius:999px;background:#fff;")
@@ -2511,6 +2574,7 @@ class Main(QtWidgets.QWidget):
             self.status_chip.setText("● Offline");
             self.status_chip.setStyleSheet(
                 "color:#ef4444;font-weight:800;padding:6px 10px;border:1px solid #e5e7eb;border-radius:999px;background:#fff;")
+        self._conn_state = online
 
     def _refresh(self, prefer_server=True):
         self.btn_refresh.setEnabled(False)
@@ -2520,12 +2584,36 @@ class Main(QtWidgets.QWidget):
             # อัปเดต historical monitor seen ก่อน render (เก็บ HN ที่ monitor รายงานมา)
             self._scan_monitor_status_transitions(rows)
             self._rebuild_table(rows);
-            self._chip(True)
-        except Exception:
-            self._chip(False);
-            self._rebuild_table([])
+            self._on_refresh_success()
+        except Exception as exc:
+            self._on_refresh_error(exc)
         finally:
             self.btn_refresh.setEnabled(True)
+
+    def _on_refresh_success(self) -> None:
+        self._refresh_fail_streak = 0
+        self._last_refresh_error = None
+        self._chip(True)
+        self._set_pull_timer(self._pull_base_interval)
+
+    def _on_refresh_error(self, exc: Exception | None) -> None:
+        self._refresh_fail_streak = min(self._refresh_fail_streak + 1, 6)
+        self._chip(False)
+        self._rebuild_table([])
+        backoff = min(self._pull_base_interval * (2 ** max(0, self._refresh_fail_streak - 1)), self._pull_max_interval)
+        self._set_pull_timer(backoff)
+        if not exc:
+            self._last_refresh_error = None
+            return
+
+        message = f"{exc.__class__.__name__}: {exc}"
+        if self._last_refresh_error == message:
+            return
+        if isinstance(exc, requests.exceptions.RequestException):
+            logger.warning("Monitor refresh failed: %s", message)
+        else:
+            logger.exception("Monitor refresh failed", exc_info=exc)
+        self._last_refresh_error = message
 
     def _rebuild_table(self, rows):
         self.rows_cache = rows;
@@ -2562,16 +2650,31 @@ class Main(QtWidgets.QWidget):
     def _start_ws(self):
         try:
             self.ws = QWebSocket()
-            self.ws.errorOccurred.connect(lambda _e: self._ws_disc())
-            self.ws.connected.connect(lambda: (self._chip(True), self._pull.stop()))
+            self.ws.errorOccurred.connect(self._on_ws_error)
+            self.ws.connected.connect(self._on_ws_connected)
             self.ws.disconnected.connect(self._ws_disc)
             self.ws.textMessageReceived.connect(self._on_ws_msg)
             self.ws.open(QUrl(self._ws_url()))
         except Exception:
             self._ws_disc()
 
+    def _on_ws_connected(self):
+        self._pull_paused_for_ws = True
+        if hasattr(self, "_pull") and self._pull.isActive():
+            self._pull.stop()
+        self._refresh_fail_streak = 0
+        self._last_refresh_error = None
+        self._chip(True)
+
+    def _on_ws_error(self, _err):
+        self._pull_paused_for_ws = False
+        self._set_pull_timer(self._pull_base_interval)
+        self._chip(False)
+
     def _ws_disc(self):
-        if self._pull.isActive() == False: self._pull.start(3000)
+        self._pull_paused_for_ws = False
+        self._set_pull_timer(self._pull_base_interval)
+        self._chip(False)
 
     def _on_ws_msg(self, msg):
         try:
