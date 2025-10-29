@@ -4403,6 +4403,30 @@ class Main(QtWidgets.QWidget):
         a_edit = menu.addAction("แก้ไขรายการ")
         a_del = menu.addAction("ลบรายการ")
         runner_ack_action = runner_arrive_action = None
+        move_actions: Dict[QtGui.QAction, str] = {}
+        custom_move_action = None
+        if entry:
+            move_menu = menu.addMenu("ย้ายไป OR…")
+            seen_rooms: Set[str] = set()
+            available_rooms = []
+            for room in list(self.sched.or_rooms) + DEFAULT_OR_ROOMS + [entry.or_room or ""]:
+                room_norm = (room or "").strip().upper()
+                if not room_norm:
+                    continue
+                if room_norm not in seen_rooms:
+                    seen_rooms.add(room_norm)
+                    available_rooms.append(room_norm)
+
+            available_rooms.sort()
+            for room in available_rooms:
+                if entry.or_room and room == entry.or_room.strip().upper():
+                    continue
+                action = move_menu.addAction(room)
+                move_actions[action] = room
+
+            move_menu.addSeparator()
+            custom_move_action = move_menu.addAction("กำหนด OR เอง…")
+
         if RUNNER_ENABLED and entry:
             pickup_id = it.data(0, QtCore.Qt.UserRole + 2)
             if pickup_id:
@@ -4414,6 +4438,12 @@ class Main(QtWidgets.QWidget):
             self._on_result_double_click(it, 0)
         elif act == a_del:
             self._delete_entry_idx(idx_int)
+        elif act in move_actions and entry:
+            self._move_entry_to_or(entry, move_actions[act])
+        elif custom_move_action and act == custom_move_action and entry:
+            new_or, ok = QtWidgets.QInputDialog.getText(self, "กำหนด OR", "ระบุชื่อ OR ใหม่", text=entry.or_room or "")
+            if ok:
+                self._move_entry_to_or(entry, new_or)
         elif act and entry and runner_ack_action and act == runner_ack_action:
             self._handle_runner_action(entry, "ack")
         elif act and entry and runner_arrive_action and act == runner_arrive_action:
@@ -4431,6 +4461,44 @@ class Main(QtWidgets.QWidget):
             self.sched.delete(idx)
             self._render_tree2()
             SweetAlert.success(self, "สำเร็จ", "ลบรายการเรียบร้อย")
+
+    def _move_entry_to_or(self, entry: ScheduleEntry, target_or: str):
+        if not entry:
+            return
+        target = (target_or or "").strip().upper()
+        if not target:
+            return
+        if not target.startswith("OR"):
+            target = f"OR{target}" if target[0].isdigit() else target
+        if (entry.or_room or "").strip().upper() == target:
+            return
+
+        try:
+            idx = self.sched.entries.index(entry)
+        except ValueError:
+            idx = None
+
+        entry.or_room = target
+        entry.queue = 0
+        entry.case_uid = entry._gen_case_uid()
+        entry.version = int(entry.version or 1) + 1
+
+        if target not in self.sched.or_rooms:
+            updated = list(self.sched.or_rooms) + [target]
+            self.sched.set_or_rooms(updated)
+            self._refresh_or_cb(self.cb_or)
+
+        self.sched._save()
+        self._render_tree2()
+
+        msg = f"ย้าย HN {entry.hn or '-'} → {target}"
+        self.toast.show_toast(msg)
+        if idx is not None:
+            try:
+                uid = self.sched.entries[idx].uid()
+            except Exception:
+                uid = entry.uid()
+            self._flash_row_by_uid(uid)
 
     def _on_monitor_double_click(self, item: QtWidgets.QTableWidgetItem):
         row = item.row()
