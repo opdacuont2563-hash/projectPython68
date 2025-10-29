@@ -755,6 +755,7 @@ class ScheduleEntry(QtCore.QObject):
             returning_started_at: str = "",
             returned_to_ward_at: str = "",
             postop_completed: bool = False,
+            status: str = "รอผ่าตัด",
     ):
         super().__init__()
         self.or_room = or_room
@@ -784,6 +785,7 @@ class ScheduleEntry(QtCore.QObject):
         self.returning_started_at = returning_started_at or ""
         self.returned_to_ward_at = returned_to_ward_at or ""
         self.postop_completed = bool(postop_completed)
+        self.status = (status or "รอผ่าตัด").strip()
 
     def _gen_case_uid(self) -> str:
         base = f"{self.or_room}|{self.hn}|{self.time}|{self.date}"
@@ -818,6 +820,7 @@ class ScheduleEntry(QtCore.QObject):
             "returning_started_at": self.returning_started_at,
             "returned_to_ward_at": self.returned_to_ward_at,
             "postop_completed": self.postop_completed,
+            "status": self.status,
         }
 
     @staticmethod
@@ -854,6 +857,7 @@ class ScheduleEntry(QtCore.QObject):
             d.get("returning_started_at", ""),
             d.get("returned_to_ward_at", ""),
             bool(d.get("postop_completed", False)),
+            d.get("status", "รอผ่าตัด"),
         )
 
     def uid(self) -> str:
@@ -1316,23 +1320,109 @@ def extract_rows(payload):
     else:
         src = []
     rows = []
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    status_map = {
+        "รอผ่าตัด": "รอผ่าตัด",
+        "waiting": "รอผ่าตัด",
+        "queued": "รอผ่าตัด",
+        "pending": "รอผ่าตัด",
+        "กำลังผ่าตัด": "กำลังผ่าตัด",
+        "operating": "กำลังผ่าตัด",
+        "in operation": "กำลังผ่าตัด",
+        "in_operation": "กำลังผ่าตัด",
+        "in-surgery": "กำลังผ่าตัด",
+        "surgery": "กำลังผ่าตัด",
+        "ongoing": "กำลังผ่าตัด",
+        "กำลังพักฟื้น": "กำลังพักฟื้น",
+        "recovery": "กำลังพักฟื้น",
+        "pacu": "กำลังพักฟื้น",
+        "post-op": "กำลังพักฟื้น",
+        "post_operation": "กำลังพักฟื้น",
+        "กำลังส่งกลับตึก": "กำลังส่งกลับตึก",
+        "sending back": "กำลังส่งกลับตึก",
+        "transfer": "กำลังส่งกลับตึก",
+        "returning": "กำลังส่งกลับตึก",
+        "เลื่อนการผ่าตัด": "เลื่อนการผ่าตัด",
+        "postponed": "เลื่อนการผ่าตัด",
+        "deferred": "เลื่อนการผ่าตัด",
+        "canceled": "เลื่อนการผ่าตัด",
+        "cancelled": "เลื่อนการผ่าตัด",
+    }
+
     for i, it in enumerate(src, 1):
-        if not isinstance(it, dict): continue
-        hn = str(it.get("hn_full") or it.get("hn") or "").strip()
-        pid = str(it.get("patient_id") or it.get("pid") or it.get("queue_id") or "")
+        if not isinstance(it, dict):
+            continue
+
+        hn_full = str(it.get("hn_full") or it.get("hn") or "").strip()
+
+        pid = str(
+            it.get("patient_id")
+            or it.get("pid")
+            or it.get("queue_id")
+            or ""
+        ).strip()
         if not pid:
-            orr = str(it.get("or") or it.get("or_room") or "");
-            q = str(it.get("queue") or it.get("q") or "")
-            if orr and q: pid = f"{orr}-{q}"
-        status = str(it.get("status") or "")
-        ts = (it.get("timestamp") or it.get("ts") or it.get("updated_at") or it.get("created_at") or it.get("time"))
-        eta = it.get("eta_minutes", it.get("eta", it.get("eta_min")))
-        if isinstance(eta, str) and eta.isdigit():
-            eta = int(eta)
-        elif not isinstance(eta, int):
-            eta = None
-        rows.append({"id": hn if hn else i, "hn_full": hn or None, "patient_id": pid, "status": status, "timestamp": ts,
-                     "eta_minutes": eta})
+            or_room = str(it.get("or") or it.get("or_room") or "").strip()
+            q = str(it.get("queue") or it.get("q") or "").strip()
+            if or_room and q:
+                pid = f"{or_room}-{q}"
+            else:
+                pid = f"row-{i}"
+
+        status_raw = str(
+            it.get("status")
+            or it.get("state")
+            or it.get("operation_status")
+            or it.get("op_status")
+            or ""
+        ).strip().lower()
+        if status_raw in status_map:
+            status = status_map[status_raw]
+        else:
+            try:
+                idx = int(status_raw)
+                options = ["รอผ่าตัด", "กำลังผ่าตัด", "กำลังพักฟื้น", "กำลังส่งกลับตึก", "เลื่อนการผ่าตัด"]
+                status = options[idx] if 0 <= idx < len(options) else "รอผ่าตัด"
+            except Exception:
+                status = "รอผ่าตัด"
+
+        ts_val = (
+            it.get("timestamp")
+            or it.get("ts")
+            or it.get("updated_at")
+            or it.get("created_at")
+            or it.get("time")
+            or ""
+        )
+        ts_iso = ""
+        try:
+            if isinstance(ts_val, (int, float)):
+                ts_iso = datetime.fromtimestamp(float(ts_val)).isoformat(timespec="seconds")
+            elif isinstance(ts_val, str) and ts_val.strip():
+                ts_iso = ts_val
+        except Exception:
+            ts_iso = ""
+        if not _parse_iso(ts_iso):
+            ts_iso = now_iso
+
+        eta_raw = it.get("eta_minutes", it.get("eta", it.get("eta_min")))
+        try:
+            eta_minutes = int(eta_raw) if str(eta_raw).strip() != "" else None
+        except Exception:
+            eta_minutes = None
+
+        rid = it.get("id") or (hn_full if hn_full else pid) or f"row-{i}"
+
+        rows.append(
+            {
+                "id": str(rid),
+                "hn_full": hn_full or None,
+                "patient_id": pid,
+                "status": status,
+                "timestamp": ts_iso,
+                "eta_minutes": eta_minutes,
+            }
+        )
     return rows
 
 
@@ -2332,6 +2422,9 @@ class Main(QtWidgets.QWidget):
         hdr2.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
         self.table.verticalHeader().setDefaultSectionSize(34)
         gm.addWidget(self.table, 0, 0, 1, 3)
+        self._monitor_tick = QtCore.QTimer(self)
+        self._monitor_tick.timeout.connect(self._update_monitor_elapsed_cells)
+        self._monitor_tick.start(1000)
         self.btn_refresh = QtWidgets.QPushButton("รีเฟรช");
         self.btn_refresh.setProperty("variant", "ghost")
         self.btn_export = QtWidgets.QPushButton("Export CSV");
@@ -2615,6 +2708,66 @@ class Main(QtWidgets.QWidget):
             logger.exception("Monitor refresh failed", exc_info=exc)
         self._last_refresh_error = message
 
+    def _render_monitor_time_cell(self, row: dict) -> str:
+        status = row.get("status", "")
+        ts_iso = row.get("timestamp")
+        eta_min = row.get("eta_minutes")
+        ts = _parse_iso(ts_iso)
+
+        if status == STATUS_OP_START and ts:
+            now = datetime.now()
+            elapsed = now - ts
+            base = _fmt_td(elapsed)
+            if eta_min is not None:
+                try:
+                    eta_dt = ts + timedelta(minutes=int(eta_min))
+                    remaining = eta_dt - now
+                    flag = "เหลือ" if remaining.total_seconds() >= 0 else "เกินเวลา"
+                    return f"{base} / ETA {int(eta_min)} นาที ({flag} {_fmt_td(remaining)})"
+                except Exception:
+                    return base
+            return base
+
+        if ts and status in {STATUS_OP_END, STATUS_RETURNING, "กำลังพักฟื้น", "เลื่อนการผ่าตัด"}:
+            return _fmt_td(datetime.now() - ts)
+
+        return ""
+
+    def _update_monitor_elapsed_cells(self):
+        if not getattr(self, "table", None):
+            return
+        if not self.rows_cache:
+            return
+        try:
+            by_pid: Dict[str, dict] = {}
+            by_id: Dict[str, dict] = {}
+            for raw in self.rows_cache:
+                if not isinstance(raw, dict):
+                    continue
+                pid = str(raw.get("patient_id", "")).strip()
+                rid = str(raw.get("id", "")).strip()
+                if pid:
+                    by_pid[pid] = raw
+                if rid:
+                    by_id[rid] = raw
+
+            for row_idx in range(self.table.rowCount()):
+                pid_item = self.table.item(row_idx, 1)
+                rid_item = self.table.item(row_idx, 0)
+                pid = pid_item.text().strip() if pid_item else ""
+                rid = rid_item.text().strip() if rid_item else ""
+                raw = by_pid.get(pid) or by_id.get(rid)
+                if raw is None:
+                    continue
+                new_text = self._render_monitor_time_cell(raw)
+                cell = self.table.item(row_idx, 3)
+                if cell is None:
+                    self.table.setItem(row_idx, 3, QtWidgets.QTableWidgetItem(new_text))
+                elif cell.text() != new_text:
+                    cell.setText(new_text)
+        except Exception:
+            pass
+
     def _rebuild_table(self, rows):
         self.rows_cache = rows;
         self.table.setRowCount(0)
@@ -2637,9 +2790,7 @@ class Main(QtWidgets.QWidget):
             col = STATUS_COLORS.get(status, "#64748b")
             chip = StatusChipWidget(status or "-", col, pulse=(status in PULSE_STATUS))
             self.table.setCellWidget(i, 2, chip)
-            ts = _parse_iso(r.get("timestamp"));
-            txt = ""
-            if ts: txt = _fmt_td(datetime.now() - ts)
+            txt = self._render_monitor_time_cell(r)
             self.table.setItem(i, 3, QtWidgets.QTableWidgetItem(txt))
         # ให้ Result tree รีเฟรชเงื่อนไขแสดงผลด้วย เมื่อ monitor เปลี่ยน
         self._render_tree2()
@@ -3844,6 +3995,9 @@ class Main(QtWidgets.QWidget):
                 continue
 
             changed = False
+            if getattr(entry, "status", "") != status:
+                entry.status = status
+                changed = True
             if status == STATUS_OP_START:
                 self._set_time_start_if_empty(entry)
                 if entry.state in {"scheduled", "in_or", "operation_ended", "postop_pending", ""}:
@@ -3860,10 +4014,10 @@ class Main(QtWidgets.QWidget):
                 if entry.state != "returning_to_ward":
                     entry.state = "returning_to_ward"
                     entry.returning_started_at = _now_iso()
-                    entry.version = int(entry.version or 1) + 1
                     changed = True
 
             if changed:
+                entry.version = int(entry.version or 1) + 1
                 self.sched._save()
 
     def _is_entry_completed(self, e: ScheduleEntry) -> bool:
@@ -4366,6 +4520,7 @@ class Main(QtWidgets.QWidget):
                     "time_end",
                     "ward",
                     "doctor",
+                    "status",
                     "state",
                     "returning_started_at",
                     "returned_to_ward_at",
