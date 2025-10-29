@@ -2615,10 +2615,20 @@ QLabel { color:#fff; font-weight: 900; }
                 self._apply_or_expand_state(parent)
 
                 for e in sorted(groups[orr], key=row_sort_key):
+                    display_or = e.or_room or orr or "-"
+                    display_time = e.time or "-"
+                    if display_or == "-" and display_time == "-":
+                        or_cell = "-"
+                    elif display_or == "-":
+                        or_cell = display_time
+                    elif display_time == "-":
+                        or_cell = display_or
+                    else:
+                        or_cell = f"{display_or} / {display_time}"
                     row = QtWidgets.QTreeWidgetItem([
                         "",
                         _period_label(e.period),
-                        (e.time or "-"),
+                        or_cell,
                         e.hn,
                         (e.name or "-"),
                         (str(e.age) if e.age not in (None, "") else "-"),
