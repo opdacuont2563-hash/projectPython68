@@ -26,6 +26,7 @@ from .icd10_catalog import (
     get_custom_entries,
     get_diagnoses,
     get_operations,
+    operation_suggestions,
 )
 
 try:
@@ -4401,6 +4402,7 @@ class Main(QtWidgets.QWidget):
         entry = self.sched.entries[idx_int] if 0 <= idx_int < len(self.sched.entries) else None
         menu = QtWidgets.QMenu(self)
         a_edit = menu.addAction("แก้ไขรายการ")
+        a_postop = menu.addAction("บันทึกหลังผ่าตัด…") if entry else None
         a_del = menu.addAction("ลบรายการ")
         runner_ack_action = runner_arrive_action = None
         move_actions: Dict[QtGui.QAction, str] = {}
@@ -4436,6 +4438,8 @@ class Main(QtWidgets.QWidget):
         act = menu.exec(self.tree2.viewport().mapToGlobal(pos))
         if act == a_edit:
             self._on_result_double_click(it, 0)
+        elif entry and a_postop and act == a_postop:
+            self._open_postop_editor(entry)
         elif act == a_del:
             self._delete_entry_idx(idx_int)
         elif act in move_actions and entry:
@@ -4461,6 +4465,34 @@ class Main(QtWidgets.QWidget):
             self.sched.delete(idx)
             self._render_tree2()
             SweetAlert.success(self, "สำเร็จ", "ลบรายการเรียบร้อย")
+
+    def _open_postop_editor(self, entry: ScheduleEntry) -> None:
+        if not entry:
+            return
+
+        dlg = PostOpDialog(entry, self)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        values = dlg.values()
+        entry.assist1 = values.get("assist1", "")
+        entry.assist2 = values.get("assist2", "")
+        entry.scrub = values.get("scrub", "")
+        entry.circulate = values.get("circulate", "")
+        entry.ops = list(values.get("ops", []))
+        entry.diags = list(values.get("diags", []))
+
+        entry.postop_completed = self._is_entry_completed(entry)
+        if entry.postop_completed and entry.state in {"postop_pending", "operation_ended", "returning_to_ward"}:
+            entry.state = "returned_to_ward"
+        elif not entry.postop_completed and entry.state == "returned_to_ward":
+            entry.state = "postop_pending"
+
+        entry.version = int(entry.version or 1) + 1
+        self.sched._save()
+        self._render_tree2()
+        self._flash_row_by_uid(entry.uid())
+        self.toast.show_toast("บันทึกข้อมูลหลังผ่าตัดแล้ว", 2200)
 
     def _move_entry_to_or(self, entry: ScheduleEntry, target_or: str):
         if not entry:
@@ -4872,6 +4904,181 @@ class SearchSelectAdder(QtWidgets.QWidget):
     def _emit_items_changed(self):
         self.itemsChanged.emit(self.items())
 
+
+class PostOpDialog(QtWidgets.QDialog):
+    """Dialog สำหรับบันทึกข้อมูลหลังผ่าตัด พร้อมตัวเลือกแบบค้นหาได้"""
+
+    def __init__(self, entry: ScheduleEntry, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.entry = entry
+        self.specialty_key = _dept_to_specialty_key(getattr(entry, "dept", "")) or "Surgery"
+        self._op_limit = 60
+        self._dx_limit = 80
+        self._latest_op_query = ""
+        self._latest_dx_query = ""
+
+        self.setWindowTitle(f"บันทึกหลังผ่าตัด — HN {entry.hn or '-'}")
+        self.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        grid.addWidget(QtWidgets.QLabel("Assist 1"), 0, 0)
+        self.assist1 = make_search_combo(SCRUB_NURSES)
+        self.assist1.setEditText(entry.assist1 or "")
+        grid.addWidget(self.assist1, 0, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Assist 2"), 0, 2)
+        self.assist2 = make_search_combo(SCRUB_NURSES)
+        self.assist2.setEditText(entry.assist2 or "")
+        grid.addWidget(self.assist2, 0, 3)
+
+        grid.addWidget(QtWidgets.QLabel("Scrub"), 1, 0)
+        self.scrub = make_search_combo(SCRUB_NURSES)
+        self.scrub.setEditText(entry.scrub or "")
+        grid.addWidget(self.scrub, 1, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Circulate"), 1, 2)
+        self.circulate = make_search_combo(SCRUB_NURSES)
+        self.circulate.setEditText(entry.circulate or "")
+        grid.addWidget(self.circulate, 1, 3)
+
+        row = 2
+        op_lbl = QtWidgets.QLabel("Operation (หลังผ่าตัด)")
+        op_lbl.setProperty("hint", "1")
+        grid.addWidget(op_lbl, row, 0, 1, 4)
+        row += 1
+
+        self.op_adder = SearchSelectAdder("ค้นหา/เลือก Operation...", suggestions=[])
+        for op_text in entry.ops or []:
+            if op_text:
+                self.op_adder.list.addItem(op_text)
+        grid.addWidget(self.op_adder, row, 0, 1, 4)
+        row += 1
+
+        dx_lbl = QtWidgets.QLabel("Diagnosis (หลังผ่าตัด)")
+        dx_lbl.setProperty("hint", "1")
+        grid.addWidget(dx_lbl, row, 0, 1, 4)
+        row += 1
+
+        self.dx_adder = SearchSelectAdder("ค้นหา ICD-10 ...", suggestions=[])
+        for dx_text in entry.diags or []:
+            if dx_text:
+                self.dx_adder.list.addItem(dx_text)
+        grid.addWidget(self.dx_adder, row, 0, 1, 4)
+
+        layout.addLayout(grid)
+
+        button_bar = QtWidgets.QHBoxLayout()
+        button_bar.addStretch(1)
+        btn_save = QtWidgets.QPushButton("💾 บันทึกหลังผ่าตัด")
+        btn_save.setProperty("variant", "primary")
+        btn_cancel = QtWidgets.QPushButton("ยกเลิก")
+        btn_cancel.setProperty("variant", "ghost")
+        button_bar.addWidget(btn_cancel)
+        button_bar.addWidget(btn_save)
+        layout.addLayout(button_bar)
+
+        btn_save.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+
+        self._reload_operation_catalog()
+        self._reload_diagnosis_catalog()
+        self._connect_signals()
+
+    def _connect_signals(self) -> None:
+        if self.op_adder.search_line:
+            self.op_adder.search_line.textChanged.connect(self._on_op_query_changed)
+        if self.dx_adder.search_line:
+            self.dx_adder.search_line.textChanged.connect(self._on_dx_query_changed)
+
+        self.op_adder.itemsChanged.connect(self._on_op_items_changed)
+        self.op_adder.requestPersist.connect(lambda text: self._persist_catalog("operation", text))
+        self.dx_adder.requestPersist.connect(lambda text: self._persist_catalog("diagnosis", text))
+
+        self._op_timer = QtCore.QTimer(self)
+        self._op_timer.setSingleShot(True)
+        self._op_timer.setInterval(120)
+        self._op_timer.timeout.connect(lambda: self._apply_op_query(self._latest_op_query))
+
+        self._dx_timer = QtCore.QTimer(self)
+        self._dx_timer.setSingleShot(True)
+        self._dx_timer.setInterval(120)
+        self._dx_timer.timeout.connect(lambda: self._apply_dx_query(self._latest_dx_query))
+
+    def _load_operation_list(self) -> List[str]:
+        base = operation_suggestions(self.specialty_key) or []
+        custom = get_custom_entries("operation", self.specialty_key) or []
+        return sorted({text.strip() for text in (*base, *custom) if text})
+
+    def _load_diagnosis_list(self, ops: Optional[List[str]] = None) -> List[str]:
+        base = diagnosis_suggestions(self.specialty_key, ops or []) or []
+        custom = get_custom_entries("diagnosis", self.specialty_key) or []
+        return sorted({text.strip() for text in (*base, *custom) if text})
+
+    def _reload_operation_catalog(self) -> None:
+        self._all_ops = self._load_operation_list()
+        self._op_index = FastSearchIndex(self._all_ops, prefix_len=3) if self._all_ops else None
+        self._apply_op_query("")
+
+    def _reload_diagnosis_catalog(self) -> None:
+        current_ops = self.op_adder.items()
+        self._all_dx = self._load_diagnosis_list(current_ops)
+        self._dx_index = FastSearchIndex(self._all_dx, prefix_len=3) if self._all_dx else None
+        self._apply_dx_query("")
+
+    def _persist_catalog(self, kind: str, text: str) -> None:
+        item = (text or "").strip()
+        if not item:
+            return
+        added = add_custom_entry(kind, self.specialty_key, item)
+        title = "สำเร็จ" if added else "ซ้ำ"
+        message = "บันทึกรายการใหม่เรียบร้อย" if added else "มีรายการนี้อยู่แล้ว"
+        QtWidgets.QMessageBox.information(self, title, message)
+        if kind == "operation":
+            self._reload_operation_catalog()
+        else:
+            self._reload_diagnosis_catalog()
+
+    def _on_op_items_changed(self, _items: List[str]) -> None:
+        self._reload_diagnosis_catalog()
+
+    def _on_op_query_changed(self, text: str) -> None:
+        self._latest_op_query = text or ""
+        self._op_timer.start()
+
+    def _apply_op_query(self, query: str) -> None:
+        if self._op_index:
+            results = self._op_index.search(query, self._op_limit)
+        else:
+            results = self._all_ops[: self._op_limit]
+        self.op_adder.set_suggestions(results)
+
+    def _on_dx_query_changed(self, text: str) -> None:
+        self._latest_dx_query = text or ""
+        self._dx_timer.start()
+
+    def _apply_dx_query(self, query: str) -> None:
+        if self._dx_index:
+            results = self._dx_index.search(query, self._dx_limit)
+        else:
+            results = self._all_dx[: self._dx_limit]
+        self.dx_adder.set_suggestions(results)
+
+    def values(self) -> Dict[str, object]:
+        return {
+            "assist1": self.assist1.currentText().strip(),
+            "assist2": self.assist2.currentText().strip(),
+            "scrub": self.scrub.currentText().strip(),
+            "circulate": self.circulate.currentText().strip(),
+            "ops": self.op_adder.items(),
+            "diags": self.dx_adder.items(),
+        }
 
 def main():
     QLocale.setDefault(QLocale("en_US"))
