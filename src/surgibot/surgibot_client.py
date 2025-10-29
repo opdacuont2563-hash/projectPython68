@@ -1255,7 +1255,7 @@ class Main(QtWidgets.QWidget):
                 i = self.cb_or.findText(or_room)
                 if i >= 0: self.cb_or.setCurrentIndex(i)
 
-            q_raw = (item.text(18) or "").strip()
+            q_raw = (item.text(19) or "").strip()
             if q_raw.startswith("0-"):
                 qi = self.cb_q.findText(q_raw)
                 if qi >= 0:
@@ -1631,7 +1631,7 @@ QCheckBox { color:#0f172a; }
         )
         gs = self.card_sched.grid(); gs.setContentsMargins(0,0,0,0)
         self.tree_sched = QtWidgets.QTreeWidget()
-        self.tree_sched.setColumnCount(20)
+        self.tree_sched.setColumnCount(21)
         self.tree_sched.setHeaderLabels([
             "บันทึก",
             "ช่วงเวลา",
@@ -1649,6 +1649,7 @@ QCheckBox { color:#0f172a; }
             "Assist2",
             "Scrub",
             "Circulate",
+            "สถานะ",
             "เริ่ม",
             "จบ",
             "คิว",
@@ -1659,7 +1660,7 @@ QCheckBox { color:#0f172a; }
         hdr.setStretchLastSection(False)
         hdr.setDefaultAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         hdr.setFixedHeight(42)
-        for i in range(20):
+        for i in range(21):
             hdr.setSectionResizeMode(i, QtWidgets.QHeaderView.ResizeToContents)
         self.tree_sched.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.tree_sched.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
@@ -2663,8 +2664,6 @@ QLabel { color:#fff; font-weight: 900; }
             self._clear_sched_pulser()
             tree.clear()
 
-            now_code = _now_period(datetime.now())  # "in" | "off"
-            in_monitor = set(self._current_monitor_hn or [])
             today = datetime.now().date()
 
             def _is_today(entry: _SchedEntry) -> bool:
@@ -2679,9 +2678,9 @@ QLabel { color:#fff; font-weight: 900; }
             def should_show(e: _SchedEntry) -> bool:
                 if not _is_today(e):
                     return False
-                if now_code == "in":
+                if not self.ws_connected:
                     return True
-                return (e.period == "off") or (e.period == "in" and e.hn and e.hn in in_monitor)
+                return True
 
             for e in self.sched.entries:
                 if should_show(e):
@@ -2746,6 +2745,7 @@ QLabel { color:#fff; font-weight: 900; }
                         (e.assist2 or "-"),
                         (e.scrub or "-"),
                         (e.circulate or "-"),
+                        (e.status or "-"),
                         (e.time_start or "-"),
                         (e.time_end or "-"),
                         (str(e.queue) if str(getattr(e, "queue", "0")).isdigit() and int(getattr(e, "queue", "0")) > 0 else "ตามเวลา"),
@@ -2753,6 +2753,15 @@ QLabel { color:#fff; font-weight: 900; }
                     ])
                     row.setData(0, QtCore.Qt.UserRole, e)
                     parent.addChild(row)
+
+                    status_text = (e.status or "").strip()
+                    if status_text:
+                        col_hex = STATUS_COLORS.get(status_text)
+                        if col_hex:
+                            status_col = 16
+                            row.setBackground(status_col, QtGui.QBrush(QtGui.QColor(col_hex)))
+                            fg = "#ffffff" if status_text in {"กำลังผ่าตัด", "กำลังส่งกลับตึก", "เลื่อนการผ่าตัด"} else "#000000"
+                            row.setForeground(status_col, QtGui.QBrush(QtGui.QColor(fg)))
 
                     if self._incomplete(e):
                         tree.setItemWidget(row, 0, self._make_postop_button(e.uid()))
