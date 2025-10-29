@@ -171,7 +171,7 @@ def sync_config_to_sheet():
             ss = _gspread_client.open_by_key(SPREADSHEET_ID)
             cfg = ss.add_worksheet(title="Config", rows=10, cols=4)
         cfg.clear()
-        cfg.update(values=[["ANNOUNCE_MIN", ANNOUNCE_MIN]], range_name="A1:B1")
+        cfg.update("A1:B1", [["ANNOUNCE_MIN", ANNOUNCE_MIN]])
     except Exception as e:
         logger.warning("[Sheets] Config sync error: %s", e)
 
@@ -189,9 +189,9 @@ def _update_next_announce_to_sheet(next_dt: datetime):
         now_iso = datetime.now().replace(microsecond=0).isoformat()
         next_iso = next_dt.replace(microsecond=0).isoformat()
 
-        cfg.update(values=[["ANNOUNCE_MIN", ANNOUNCE_MIN]], range_name="A1:B1")
-        cfg.update(values=[["NEXT_ANNOUNCE_ISO", next_iso]], range_name="A2:B2")
-        cfg.update(values=[["SERVER_NOW_ISO", now_iso]], range_name="A3:B3")
+        cfg.update("A1:B1", [["ANNOUNCE_MIN", ANNOUNCE_MIN]])
+        cfg.update("A2:B2", [["NEXT_ANNOUNCE_ISO", next_iso]])
+        cfg.update("A3:B3", [["SERVER_NOW_ISO", now_iso]])
     except Exception as e:
         logger.warning("[Sheets] update next announce error: %s", e)
 
