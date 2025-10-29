@@ -1246,6 +1246,7 @@ class Main(QtWidgets.QWidget):
             if isinstance(entry, _SchedEntry):
                 self._last_selected_uid = entry.uid()
                 self._set_status_combo(entry.status or None)
+                self._auto_assign_or_queue_by_doctor(entry)
             else:
                 self._last_selected_uid = ""
 
@@ -1272,6 +1273,109 @@ class Main(QtWidgets.QWidget):
             self.cb_status.setFocus()
         except Exception:
             pass
+
+    def _auto_assign_or_queue_by_doctor(self, entry: "_SchedEntry") -> bool:
+        """Auto-select OR/Queue based on doctor order within the same OR and day."""
+        try:
+            if not isinstance(entry, _SchedEntry):
+                return False
+            if not hasattr(self, "sched") or not hasattr(self, "cb_or") or not hasattr(self, "cb_q"):
+                return False
+
+            or_room = (entry.or_room or "").strip()
+            doctor = (entry.doctor or "").strip()
+            target_hn = (entry.hn or "").strip()
+            if not or_room or not doctor or not target_hn:
+                return False
+
+            target_date = entry.date_obj
+            if not target_date:
+                target_date = _parse_date(entry.date) if getattr(entry, "date", None) else None
+            if not target_date:
+                target_date = datetime.now().date()
+
+            def _coerce_date(candidate: "_SchedEntry"):
+                if getattr(candidate, "date_obj", None):
+                    return candidate.date_obj
+                raw = getattr(candidate, "date", "")
+                return _parse_date(raw) or target_date
+
+            def _queue_value(candidate: "_SchedEntry") -> int:
+                try:
+                    return int(getattr(candidate, "queue", 0) or 0)
+                except Exception:
+                    return 0
+
+            def _time_minutes(candidate: "_SchedEntry") -> int:
+                txt = str(getattr(candidate, "time", "") or "").strip()
+                if not txt:
+                    return 24 * 60 + 1
+                parts = txt.split(":")
+                try:
+                    hh = int(parts[0])
+                    mm = int(parts[1]) if len(parts) > 1 else 0
+                except Exception:
+                    return 24 * 60 + 1
+                hh = max(0, min(23, hh))
+                mm = max(0, min(59, mm))
+                return hh * 60 + mm
+
+            same_entries: list[_SchedEntry] = []
+            for candidate in getattr(self.sched, "entries", []):
+                if not isinstance(candidate, _SchedEntry):
+                    continue
+                if (candidate.or_room or "").strip() != or_room:
+                    continue
+                if (candidate.doctor or "").strip() != doctor:
+                    continue
+                if _coerce_date(candidate) != target_date:
+                    continue
+                same_entries.append(candidate)
+
+            if not same_entries:
+                return False
+
+            same_entries.sort(
+                key=lambda cand: (
+                    0,
+                    _queue_value(cand),
+                    _time_minutes(cand),
+                )
+                if _queue_value(cand) > 0
+                else (
+                    1,
+                    _time_minutes(cand),
+                    cand.uid(),
+                )
+            )
+
+            position: int | None = None
+            for idx, candidate in enumerate(same_entries, start=1):
+                if (candidate.hn or "").strip() == target_hn:
+                    position = idx
+                    break
+
+            if position is None:
+                position = len(same_entries)
+
+            idx_or = self.cb_or.findText(or_room)
+            if idx_or < 0:
+                self.cb_or.addItem(or_room)
+                idx_or = self.cb_or.findText(or_room)
+            if idx_or >= 0:
+                self.cb_or.setCurrentIndex(idx_or)
+
+            queue_label = f"0-{position}"
+            idx_queue = self.cb_q.findText(queue_label)
+            if idx_queue < 0:
+                self.cb_q.addItem(queue_label)
+                idx_queue = self.cb_q.findText(queue_label)
+            if idx_queue >= 0:
+                self.cb_q.setCurrentIndex(idx_queue)
+
+            return True
+        except Exception:
+            return False
 
     def _make_form_label(self, text: str) -> QtWidgets.QLabel:
         lbl = QtWidgets.QLabel(text)
