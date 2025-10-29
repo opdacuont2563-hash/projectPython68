@@ -11,8 +11,9 @@ import os, sys, json, argparse
 import math
 import time
 from pathlib import Path
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Optional
 from datetime import datetime, timedelta, time as dtime, date as ddate
+from urllib.parse import urlparse
 
 import requests
 
@@ -365,8 +366,39 @@ def _parse_date(date_str: str):
 
 # ---------- HTTP ----------
 class SurgiBotClientHTTP:
-    def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT, token=DEFAULT_TOKEN, timeout=DEFAULT_TIMEOUT):
-        self.base = f"http://{host}:{port}"
+    def __init__(
+        self,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_PORT,
+        token: str = DEFAULT_TOKEN,
+        timeout: float = DEFAULT_TIMEOUT,
+        base_url: str | None = None,
+    ):
+        candidate = base_url or f"http://{host}:{port}"
+        if "://" not in candidate:
+            candidate = f"http://{candidate}"
+        parsed = urlparse(candidate)
+
+        scheme = parsed.scheme or "http"
+        eff_host = parsed.hostname or host or DEFAULT_HOST
+        eff_port = parsed.port or port
+        path = parsed.path.rstrip("/") if parsed.path else ""
+
+        host_fmt = f"[{eff_host}]" if ":" in eff_host and not eff_host.startswith("[") else eff_host
+        base = f"{scheme}://{host_fmt}"
+        if eff_port:
+            base += f":{eff_port}"
+        if path:
+            base += path
+
+        if not base:
+            base = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
+
+        self.scheme = scheme
+        self.host = eff_host
+        self.port = eff_port
+        self.path = path
+        self.base = base.rstrip("/") if path else base
         self.token = token
         self.timeout = timeout or CONFIG.request_timeout
         self.sess = SESSION_MANAGER.get()
@@ -407,16 +439,31 @@ class SurgiBotClientHTTP:
         return {"items": []}
 
     def list_items(self):
+        last_error: Optional[Exception] = None
         try:
-            r = self.sess.get(f"{self.base}{API_LIST_FULL}?token={self.token}", timeout=self.timeout, headers={"Accept":"application/json"})
-            if r.status_code == 200: return self._wrap_items(r.json())
-        except Exception:
-            pass
+            r = self.sess.get(
+                f"{self.base}{API_LIST_FULL}?token={self.token}",
+                timeout=self.timeout,
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            return self._wrap_items(r.json())
+        except Exception as exc:
+            last_error = exc
+
         try:
-            r = self.sess.get(self.base + API_LIST, timeout=self.timeout, headers={"Accept":"application/json"})
-            if r.status_code == 200: return self._wrap_items(r.json())
-        except Exception:
-            pass
+            r = self.sess.get(
+                self.base + API_LIST,
+                timeout=self.timeout,
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            return self._wrap_items(r.json())
+        except Exception as exc:
+            last_error = exc
+
+        if last_error is not None:
+            raise last_error
         return {"items": []}
 
 
@@ -992,7 +1039,10 @@ class WaveBanner(QtWidgets.QFrame):
 class Main(QtWidgets.QWidget):
     def __init__(self, host, port, token):
         super().__init__()
-        self.cli = SurgiBotClientHTTP(host, port, token)
+        base_candidate = host if isinstance(host, str) else str(host)
+        if "://" not in str(base_candidate):
+            base_candidate = f"http://{host}:{port}"
+        self.cli = SurgiBotClientHTTP(token=token, base_url=str(base_candidate))
         self.model = LocalTableModel()
         self.rows_cache = []
         self.sched = SharedScheduleModel()
@@ -1037,6 +1087,20 @@ class Main(QtWidgets.QWidget):
         self.setWindowTitle("SurgiBot Client — Modern (PySide6)")
         self.resize(1440, 900)
         self._build_ui()
+
+        # Seed settings inputs with CLI defaults before loading persisted values
+        try:
+            self.ent_host.setText(str(host))
+        except Exception:
+            self.ent_host.setText(str(DEFAULT_HOST))
+        try:
+            self.ent_port.setText(str(port))
+        except Exception:
+            self.ent_port.setText(str(DEFAULT_PORT))
+        try:
+            self.ent_token.setText(str(token))
+        except Exception:
+            self.ent_token.setText(str(DEFAULT_TOKEN))
         self._load_settings()
 
         # ---------- load persisted monitor state BEFORE first refresh ----------
@@ -2107,10 +2171,8 @@ QLabel { color:#fff; font-weight: 900; }
 
     def _client(self):
         try:
-            h = self.ent_host.text().strip() or DEFAULT_HOST
-            p = int(self.ent_port.text()) if self.ent_port.text().strip() else DEFAULT_PORT
-            t = self.ent_token.text().strip() or DEFAULT_TOKEN
-            return SurgiBotClientHTTP(h, p, t)
+            base, token, scheme, host, port, _path = self._parse_endpoint()
+            return SurgiBotClientHTTP(host=host, port=port, token=token, timeout=DEFAULT_TIMEOUT, base_url=base)
         except Exception:
             return self.cli
 
@@ -2411,11 +2473,50 @@ QLabel { color:#fff; font-weight: 900; }
             self._refresh_timer.start(CONFIG.client_debounce_ms)
 
     # ---------- WebSocket ----------
-    def _ws_url(self):
-        host = self.ent_host.text().strip() or DEFAULT_HOST
-        port = int(self.ent_port.text().strip() or DEFAULT_PORT)
+    def _parse_endpoint(self):
+        host_text = self.ent_host.text().strip()
+        port_text = self.ent_port.text().strip()
         token = self.ent_token.text().strip() or DEFAULT_TOKEN
-        return f"ws://{host}:{port}{API_WS}?token={token}"
+
+        raw = host_text or DEFAULT_HOST
+        candidate = raw if "://" in raw else f"http://{raw}"
+        parsed = urlparse(candidate)
+
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname or DEFAULT_HOST
+
+        port: int | None
+        if parsed.port is not None:
+            port = parsed.port
+        else:
+            try:
+                port = int(port_text) if port_text else DEFAULT_PORT
+            except Exception:
+                port = DEFAULT_PORT
+
+        path = parsed.path.rstrip("/") if parsed.path else ""
+
+        host_fmt = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        base = f"{scheme}://{host_fmt}"
+        if port:
+            base += f":{port}"
+        if path:
+            base += path
+
+        return (base.rstrip("/") if path else base), token, scheme, host, port, path
+
+    def _ws_url(self):
+        _base, token, scheme, host, port, path = self._parse_endpoint()
+        ws_scheme = "wss" if scheme.lower() == "https" else "ws"
+        host_fmt = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        host_part = host_fmt
+        if port and not (
+            (scheme.lower() == "http" and port == 80)
+            or (scheme.lower() == "https" and port == 443)
+        ):
+            host_part += f":{port}"
+        path_part = path or ""
+        return f"{ws_scheme}://{host_part}{path_part}{API_WS}?token={token}"
 
     def _start_websocket(self):
         if self.ws:
@@ -2436,19 +2537,23 @@ QLabel { color:#fff; font-weight: 900; }
 
     def _ws_connected(self):
         self.ws_connected = True
-        self._bump_conn(True)
         if self._pull.isActive():
             self._pull.stop()
 
     def _ws_disconnected(self):
         self.ws_connected = False
-        self._bump_conn(False)
+        if self.ws is not None:
+            try:
+                self.ws.deleteLater()
+            except Exception:
+                pass
+            self.ws = None
         if not self._pull.isActive():
             self._pull.start(2000)
 
     def _ws_error(self, err):
-        self._bump_conn(False)
         self._ws_disconnected()
+        logger.debug("WebSocket connection disabled (fallback to polling): %s", err)
 
     def _on_ws_message(self, msg: str):
         try:
