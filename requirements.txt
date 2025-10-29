@@ -1,0 +1,22 @@
+# Core runtime
+Flask
+waitress
+requests
+
+# UI
+PySide6
+
+# Speech / audio (optional but used in server)
+gTTS
+pygame
+pyttsx3
+
+# Google Sheets (optional)
+gspread
+google-auth
+
+# Convenience
+python-dotenv
+
+# Optional fuzzy search (client will work without it)
+rapidfuzz
