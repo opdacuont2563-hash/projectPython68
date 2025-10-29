@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
 from datetime import datetime, timedelta, time as dtime, date
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import requests
 
@@ -321,7 +322,18 @@ DEFAULT_PORT = CONFIG.client_port
 DEFAULT_TOKEN = CONFIG.client_secret
 
 # === Runner pickup service (FastAPI) ===
-RUNNER_BASE = os.getenv("SURGIBOT_RUNNER_BASE_URL", "http://127.0.0.1:8777").rstrip("/")
+RUNNER_ENABLED = bool(CONFIG.runner_enabled)
+RUNNER_PORT = CONFIG.runner_port
+RUNNER_BASE_DEFAULT = (CONFIG.runner_base_url or "").rstrip("/")
+if RUNNER_ENABLED and not RUNNER_BASE_DEFAULT:
+    RUNNER_BASE_DEFAULT = f"http://{DEFAULT_HOST}:{RUNNER_PORT}".rstrip("/")
+if not RUNNER_ENABLED:
+    RUNNER_BASE_DEFAULT = ""
+_RUNNER_SCHEME_DEFAULT = (
+    urlparse(RUNNER_BASE_DEFAULT).scheme or "http"
+    if RUNNER_BASE_DEFAULT
+    else "http"
+)
 RUNNER_UPDATE_API = "/runner/update"
 RUNNER_HEALTH_API = "/health"
 RUNNER_LIST_API = "/runner/list"
@@ -330,10 +342,37 @@ RUNNER_ARRIVE_API = "/runner/arrive"
 RUNNER_FINISH_API = "/runner/finish"
 
 
-def runner_health_ok(timeout: float = 0.8) -> bool:
+def _resolve_runner_base(base_url: Optional[str] = None) -> str:
+    if not RUNNER_ENABLED:
+        return ""
+    raw = (base_url or "").strip()
+    if not raw:
+        return RUNNER_BASE_DEFAULT
+    candidate = raw
+    if "://" not in candidate:
+        candidate = f"{_RUNNER_SCHEME_DEFAULT}://{candidate}"
+    parsed = urlparse(candidate)
+    scheme = parsed.scheme or _RUNNER_SCHEME_DEFAULT
+    host = parsed.hostname or ""
+    if not host:
+        return RUNNER_BASE_DEFAULT
+    if host in {"0.0.0.0", ""}:
+        host = "127.0.0.1"
+    port = parsed.port or RUNNER_PORT
+    if port:
+        return f"{scheme}://{host}:{port}".rstrip("/")
+    return f"{scheme}://{host}".rstrip("/")
+
+
+def runner_health_ok(base_url: Optional[str] = None, timeout: float = 0.8) -> bool:
+    if not RUNNER_ENABLED:
+        return False
     try:
         sess = SESSION_MANAGER.get()
-        r = sess.get(f"{RUNNER_BASE}{RUNNER_HEALTH_API}", timeout=timeout)
+        base = _resolve_runner_base(base_url)
+        if not base:
+            return False
+        r = sess.get(f"{base}{RUNNER_HEALTH_API}", timeout=timeout)
         return bool(r.ok)
     except requests.RequestException:
         return False
@@ -361,10 +400,15 @@ RUNNER_STATUS_COLORS = {
 }
 
 
-def _fetch_runner_status_map(day: str) -> Dict[str, dict]:
+def _fetch_runner_status_map(day: str, base_url: Optional[str] = None) -> Dict[str, dict]:
+    if not RUNNER_ENABLED:
+        return {}
     try:
+        base = _resolve_runner_base(base_url)
+        if not base:
+            return {}
         resp = requests.get(
-            f"{RUNNER_BASE}{RUNNER_LIST_API}",
+            f"{base}{RUNNER_LIST_API}",
             params={"date": day},
             timeout=2.0,
             headers={"Accept": "application/json"},
@@ -1644,6 +1688,18 @@ def _rule_tokens(rule: Dict[str, object]) -> List[str]:
     return [str(doctor_token or "")]
 
 
+DOCTOR_PREFERRED_OR: Dict[str, str] = {}
+for weekday_plan in WEEKLY_DOCTOR_OR_PLAN.values():
+    for or_room, rules in (weekday_plan or {}).items():
+        for rule in rules or []:
+            for token in _rule_tokens(rule):
+                if not token or token in CLOSED_TOKENS or token in GROUPS:
+                    continue
+                normalized = normalize_doctor_name(token)
+                if normalized and normalized not in DOCTOR_PREFERRED_OR:
+                    DOCTOR_PREFERRED_OR[normalized] = or_room
+
+
 def _rule_matches_service(rule: Dict[str, object], service_token: str) -> bool:
     if not service_token:
         return False
@@ -1803,6 +1859,11 @@ def pick_or_by_doctor(case_date: date, time_str: str, doctor_name: str) -> str:
         for or_room, rule in iter_rules():
             if _rule_matches_service(rule, service_token):
                 return or_room
+
+    normalized = normalize_doctor_name(doctor_name)
+    fallback_or = DOCTOR_PREFERRED_OR.get(normalized)
+    if fallback_or:
+        return fallback_or
 
     return ""
 
@@ -2162,6 +2223,9 @@ class Main(QtWidgets.QWidget):
         self.btn_send_runner = QtWidgets.QPushButton("🚚 ส่งให้ Runner (วันนี้)")
         self.btn_send_runner.setProperty("variant", "primary")
         import_bar.addWidget(self.btn_send_runner, 0)
+        if not RUNNER_ENABLED:
+            self.btn_send_runner.hide()
+            self.btn_send_runner.setEnabled(False)
         self.btn_import_excel = QtWidgets.QPushButton("📥 นำเข้าจาก Excel")
         self.btn_import_excel.setProperty("variant", "ghost")
         import_bar.addWidget(self.btn_import_excel, 0)
@@ -2402,6 +2466,34 @@ class Main(QtWidgets.QWidget):
         except Exception:
             return ClientHTTP()
 
+    def _runner_base(self) -> str:
+        if not RUNNER_ENABLED:
+            return ""
+
+        override = os.getenv("SURGIBOT_RUNNER_BASE_URL")
+        if override and override.strip():
+            return _resolve_runner_base(override)
+
+        host_text = self.ent_host.text().strip() or DEFAULT_HOST
+        parsed = urlparse(host_text if "://" in host_text else f"{_RUNNER_SCHEME_DEFAULT}://{host_text}")
+        host = parsed.hostname or host_text.split(":", 1)[0]
+        if not host:
+            host = DEFAULT_HOST
+        if host in {"0.0.0.0", ""}:
+            host = "127.0.0.1"
+        scheme = parsed.scheme or _RUNNER_SCHEME_DEFAULT
+
+        cfg_base = (CONFIG.runner_base_url or "").strip()
+        if cfg_base:
+            parsed_cfg = urlparse(cfg_base if "://" in cfg_base else f"{scheme}://{cfg_base}")
+            cfg_host = parsed_cfg.hostname or ""
+            if cfg_host in {"0.0.0.0", ""}:
+                cfg_host = "127.0.0.1"
+            if cfg_host and (cfg_host == host or cfg_host not in {DEFAULT_HOST, "127.0.0.1"}):
+                return _resolve_runner_base(cfg_base)
+
+        return _resolve_runner_base(f"{scheme}://{host}")
+
     def _on_health(self):
         try:
             self._client().health(); self._chip(True)
@@ -2613,17 +2705,20 @@ class Main(QtWidgets.QWidget):
             runner_ready: Optional[bool] = None,
             collect_failures: bool = False,
     ) -> Tuple[int, List[str]]:
-        if not entries:
+        if not RUNNER_ENABLED or not entries:
             return (0, [])
 
+        base = self._runner_base()
+        if not base:
+            return (0, [])
         if runner_ready is None:
-            runner_ready = runner_health_ok()
+            runner_ready = runner_health_ok(base)
         if not runner_ready:
             return (0, [])
 
         ok = 0
         failed: List[str] = []
-        url = f"{RUNNER_BASE}{RUNNER_UPDATE_API}"
+        url = f"{base}{RUNNER_UPDATE_API}"
 
         for entry in entries:
             payload = self._entry_to_runner_payload(entry)
@@ -2674,9 +2769,14 @@ class Main(QtWidgets.QWidget):
         return text
 
     def _runner_ack(self, pickup_id: str, user: str) -> bool:
+        if not RUNNER_ENABLED:
+            return False
+        base = self._runner_base()
+        if not base:
+            return False
         try:
             resp = requests.post(
-                f"{RUNNER_BASE}{RUNNER_ACK_API}",
+                f"{base}{RUNNER_ACK_API}",
                 json={"pickup_id": pickup_id, "user": user},
                 timeout=2.0,
                 headers={"Accept": "application/json"},
@@ -2686,9 +2786,14 @@ class Main(QtWidgets.QWidget):
             return False
 
     def _runner_arrive(self, pickup_id: str, user: str) -> bool:
+        if not RUNNER_ENABLED:
+            return False
+        base = self._runner_base()
+        if not base:
+            return False
         try:
             resp = requests.post(
-                f"{RUNNER_BASE}{RUNNER_ARRIVE_API}",
+                f"{base}{RUNNER_ARRIVE_API}",
                 json={"pickup_id": pickup_id, "user": user},
                 timeout=2.0,
                 headers={"Accept": "application/json"},
@@ -2698,9 +2803,14 @@ class Main(QtWidgets.QWidget):
             return False
 
     def _runner_finish(self, pickup_id: str, user: str = "ระบบ") -> bool:
+        if not RUNNER_ENABLED:
+            return False
+        base = self._runner_base()
+        if not base:
+            return False
         try:
             resp = requests.post(
-                f"{RUNNER_BASE}{RUNNER_FINISH_API}",
+                f"{base}{RUNNER_FINISH_API}",
                 json={"pickup_id": pickup_id, "user": user},
                 timeout=2.0,
                 headers={"Accept": "application/json"},
@@ -2710,7 +2820,7 @@ class Main(QtWidgets.QWidget):
             return False
 
     def _auto_finish_runner_cases(self, entries: List["ScheduleEntry"], status_map: Dict[str, dict]) -> None:
-        if not entries or not status_map:
+        if not RUNNER_ENABLED or not entries or not status_map:
             return
         for entry in entries:
             if not self._is_entry_completed(entry):
@@ -2728,11 +2838,15 @@ class Main(QtWidgets.QWidget):
                 self._runner_finished_sent.add(pickup_id)
 
     def _handle_runner_action(self, entry: "ScheduleEntry", action: str) -> None:
+        if not RUNNER_ENABLED:
+            self.toast.show_toast("ยังไม่เปิดใช้งาน Runner")
+            return
         pid = self._pickup_id_for_entry(entry)
         if not pid:
             self.toast.show_toast("ไม่พบข้อมูล OR/HN สำหรับ Runner")
             return
-        if not runner_health_ok():
+        base = self._runner_base()
+        if not base or not runner_health_ok(base):
             self.toast.show_toast("ไม่สามารถเชื่อมต่อ Runner ได้")
             return
         user = self._ask_runner_name()
@@ -2751,17 +2865,29 @@ class Main(QtWidgets.QWidget):
             self.toast.show_toast("ส่งข้อมูลไป Runner ไม่สำเร็จ")
 
     def _on_send_runner_today(self):
+        if not RUNNER_ENABLED:
+            SweetAlert.info(self, "ยังไม่พร้อม", "ยังไม่เปิดใช้งาน Runner")
+            return
         rows = self._entries_of_selected_date()
         if not rows:
             SweetAlert.info(self, "ไม่มีรายการ", "ยังไม่มีเคสของวันที่เลือกที่จะส่งให้ Runner")
             return
 
-        runner_ready = runner_health_ok()
+        base = self._runner_base()
+        if not base:
+            SweetAlert.warning(
+                self,
+                "ไม่พบปลายทาง",
+                "ยังไม่ได้ตั้งค่าเซิร์ฟเวอร์ Runner",
+            )
+            return
+
+        runner_ready = runner_health_ok(base)
         if not runner_ready:
             SweetAlert.warning(
                 self,
                 "ไม่สามารถเชื่อมต่อ",
-                f"เชื่อมต่อ Runner ไม่ได้ (ตรวจสอบ {RUNNER_BASE})",
+                f"เชื่อมต่อ Runner ไม่ได้ (ตรวจสอบ {base})",
             )
             return
 
@@ -2782,8 +2908,11 @@ class Main(QtWidgets.QWidget):
                 f"สำเร็จ {ok} • ล้มเหลว {len(failed)}\n(HN: {', '.join(failed[:10])}{' …' if len(failed) > 10 else ''})",
             )
         else:
-            SweetAlert.warning(self, "ไม่สำเร็จ",
-                               f"ส่งให้ Runner ไม่ได้เลย — ตรวจสอบว่าเซิร์ฟเวอร์ Runner เปิดอยู่ที่ {RUNNER_BASE} หรือไม่")
+            SweetAlert.warning(
+                self,
+                "ไม่สำเร็จ",
+                f"ส่งให้ Runner ไม่ได้เลย — ตรวจสอบว่าเซิร์ฟเวอร์ Runner เปิดอยู่ที่ {base} หรือไม่",
+            )
 
         self._render_tree2()
 
@@ -3691,24 +3820,30 @@ class Main(QtWidgets.QWidget):
 
             entries_for_day = [entry for entry in entries_snapshot if _resolved_date(entry) == base_date]
 
-            valid_pickups: Set[str] = set()
-            for entry in entries_for_day:
-                pid = self._pickup_id_for_entry(entry)
-                if pid:
-                    valid_pickups.add(pid)
-            if valid_pickups:
-                self._runner_finished_sent.intersection_update(valid_pickups)
-            else:
-                self._runner_finished_sent.clear()
-
             runner_status_map: Dict[str, dict] = {}
             runner_ready = False
-            if entries_for_day:
-                runner_ready = runner_health_ok()
-                if runner_ready:
-                    self._push_rows_to_runner(entries_for_day, runner_ready=True)
-                    runner_status_map = _fetch_runner_status_map(str(base_date))
-                    self._auto_finish_runner_cases(entries_for_day, runner_status_map)
+            if RUNNER_ENABLED and entries_for_day:
+                valid_pickups: Set[str] = set()
+                for entry in entries_for_day:
+                    pid = self._pickup_id_for_entry(entry)
+                    if pid:
+                        valid_pickups.add(pid)
+                if valid_pickups:
+                    self._runner_finished_sent.intersection_update(valid_pickups)
+                else:
+                    self._runner_finished_sent.clear()
+
+                base = self._runner_base()
+                if base:
+                    runner_ready = runner_health_ok(base)
+                    if runner_ready:
+                        self._push_rows_to_runner(entries_for_day, runner_ready=True)
+                        runner_status_map = _fetch_runner_status_map(str(base_date), base)
+                        self._auto_finish_runner_cases(entries_for_day, runner_status_map)
+                else:
+                    runner_ready = False
+            else:
+                self._runner_finished_sent.clear()
             self._runner_status_cache = runner_status_map
 
             indexed_entries: List[Tuple[int, ScheduleEntry]] = list(enumerate(entries_snapshot))
@@ -3856,7 +3991,7 @@ class Main(QtWidgets.QWidget):
                         badge = _period_badge(entry.period or 'in')
                         self.tree2.setItemWidget(row, 12, badge)
 
-                        runner_info = runner_status_map.get(pickup_id, {})
+                        runner_info = runner_status_map.get(pickup_id, {}) if RUNNER_ENABLED else {}
                         runner_status = (runner_info or {}).get('status', '')
                         runner_label = self._runner_status_label(runner_status)
                         if runner_label:
@@ -4009,7 +4144,7 @@ class Main(QtWidgets.QWidget):
         a_edit = menu.addAction("แก้ไขรายการ")
         a_del = menu.addAction("ลบรายการ")
         runner_ack_action = runner_arrive_action = None
-        if entry:
+        if RUNNER_ENABLED and entry:
             pickup_id = it.data(0, QtCore.Qt.UserRole + 2)
             if pickup_id:
                 menu.addSeparator()

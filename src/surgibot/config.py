@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 import json
 import os
 
@@ -13,6 +14,9 @@ except ImportError:  # pragma: no cover - optional dependency
     load_dotenv = None  # type: ignore
 
 _ENV_LOADED = False
+
+_TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_VALUES = {"0", "false", "f", "no", "n", "off"}
 
 
 def _load_env_files() -> None:
@@ -51,6 +55,9 @@ class SurgiBotConfig:
     request_retries: int = 3
     request_backoff: float = 0.35
     log_dir: Path = Path("logs")
+    runner_enabled: bool = False
+    runner_port: int = 8777
+    runner_base_url: str = ""
 
     @property
     def api_base_url(self) -> str:
@@ -75,6 +82,47 @@ class SurgiBotConfig:
                 except (OSError, json.JSONDecodeError):
                     return None
         return None
+
+
+def _normalize_runner_base(
+    base_url: Optional[str],
+    *,
+    runner_port: int,
+    fallback_host: str,
+    fallback_scheme: str,
+) -> str:
+    if base_url:
+        candidate = base_url.strip()
+        if candidate:
+            if "://" not in candidate:
+                candidate = f"{fallback_scheme}://{candidate}"
+            parsed = urlparse(candidate)
+            scheme = parsed.scheme or fallback_scheme
+            host = parsed.hostname or ""
+            if not host:
+                host = candidate.split("://", 1)[-1].split("/", 1)[0]
+            if host in {"0.0.0.0", ""}:
+                host = "127.0.0.1"
+            port = parsed.port or runner_port
+            return f"{scheme}://{host}:{port}".rstrip("/")
+
+    host = fallback_host or "127.0.0.1"
+    if host in {"0.0.0.0", ""}:
+        host = "127.0.0.1"
+    return f"{fallback_scheme}://{host}:{runner_port}".rstrip("/")
+
+
+def _parse_bool(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = value.strip().lower()
+    if not text:
+        return default
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    return default
 
 
 def load_config() -> SurgiBotConfig:
@@ -106,6 +154,24 @@ def load_config() -> SurgiBotConfig:
     request_backoff = float(env("SURGIBOT_REQUEST_BACKOFF", str(SurgiBotConfig.request_backoff)))
     log_dir = Path(env("SURGIBOT_LOG_DIR", str(SurgiBotConfig.log_dir)))
 
+    try:
+        runner_port = int(env("SURGIBOT_RUNNER_PORT", str(SurgiBotConfig.runner_port)))
+    except ValueError:
+        runner_port = SurgiBotConfig.runner_port
+    parsed_client = urlparse(client_base if "://" in client_base else f"http://{client_base}")
+    fallback_scheme = parsed_client.scheme or "http"
+    fallback_host = parsed_client.hostname or client_host
+    runner_base_env = env("SURGIBOT_RUNNER_BASE_URL")
+    runner_enabled = _parse_bool(env("SURGIBOT_RUNNER_ENABLED"), bool((runner_base_env or "").strip()))
+    runner_base = ""
+    if runner_enabled:
+        runner_base = _normalize_runner_base(
+            runner_base_env,
+            runner_port=runner_port,
+            fallback_host=fallback_host,
+            fallback_scheme=fallback_scheme,
+        )
+
     cfg = SurgiBotConfig(
         api_host=api_host,
         api_port=api_port,
@@ -130,6 +196,9 @@ def load_config() -> SurgiBotConfig:
         request_retries=request_retries,
         request_backoff=request_backoff,
         log_dir=log_dir,
+        runner_enabled=runner_enabled,
+        runner_port=runner_port,
+        runner_base_url=runner_base,
     )
     cfg.audio_cache_dir.mkdir(parents=True, exist_ok=True)
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
