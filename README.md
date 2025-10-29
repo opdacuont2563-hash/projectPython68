@@ -1,52 +1,80 @@
-# SurgiBot — Minimal Clean Pack
+# SurgiBot
 
-This pack contains only the core Python files you said you actually use, organized in one place:
+Refactored layout that keeps the original entry points (`surgibot_server.py`, `surgibot_client.py`,
+`registry_patient_connect.py`, `icd10_catalog.py`) while moving the actual implementation into
+`src/surgibot`. The legacy filenames now act as shims so existing launch commands continue to work.
 
-- `registry_patient_connect.py` — shared UI helpers & lookup, used by the client.  
-- `surgibot_client.py` — PySide6 client (OR monitor + schedule).  
-- `surgibot_server.py` — Tkinter + Flask API server (with optional Google Sheets + announcements).  
-- `icd10_catalog.py` — in‑memory catalog + user additions (no Excel dependency).
-
-## Quick Start
-
-```bash
-# 1) Create & activate a venv (recommended)
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-
-# 2) Install deps
-pip install -r requirements.txt
-
-# 3) Configure environment (optional but recommended)
-#    Copy .env.example to .env and edit values as needed.
-#    The server reads SURGIBOT_* variables, the client uses SURGIBOT_CLIENT_*.
-copy .env.example .env  # (Windows)
-# or
-cp .env.example .env    # (macOS/Linux)
-
-# 4) Run server
-python surgibot_server.py
-
-# 5) Run client (in another terminal)
-python surgibot_client.py
+## Project layout
 ```
-
-## Notes
-
-- The client and server defaults are set so they can talk on `http://127.0.0.1:8088` using the same secret token.
-- Google Sheets is **optional**. If credentials are not provided, the server will gracefully run without Sheets.
-- Text‑to‑speech uses `gTTS` + `pygame` and `pyttsx3` on Windows. If you don't need audio announcements, you can remove those packages.
-- If you later want a more modular structure, you can place these files under a package (e.g., `src/surgibot/`) and adjust imports to relative ones. For now, everything works with the current names.
-
-## Minimal tree (this pack)
-
-```
-surgibot_minimal/
-├─ icd10_catalog.py
-├─ registry_patient_connect.py
-├─ surgibot_client.py
-├─ surgibot_server.py
+project_root/
+├─ assets/
+├─ data/
+├─ src/
+│  └─ surgibot/
+│     ├─ surgibot_server.py
+│     ├─ surgibot_client.py
+│     ├─ registry_patient_connect.py
+│     ├─ icd10_catalog.py
+│     ├─ config.py
+│     ├─ logging_setup.py
+│     ├─ workers/
+│     │   ├─ audio_worker.py
+│     │   └─ io_worker.py
+│     └─ utils/
+│         ├─ cache.py
+│         └─ db.py
+├─ Makefile
 ├─ requirements.txt
+├─ pyproject.toml
+├─ CHANGELOG.md
+├─ README.md
 └─ .env.example
 ```
+
+## Quick start
+```bash
+# 1) Optional virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# 2) Install dependencies
+make install
+
+# 3) Configure environment variables
+cp .env.example .env
+# edit .env to suit your deployment (API host, token, Google Sheets, etc.)
+
+# 4) Start the server
+make run-server
+
+# 5) Start the client (new terminal)
+make run-client
+```
+
+## Common tasks
+```bash
+make format   # black src
+make lint     # ruff check src
+```
+
+## Environment variables
+All configurable settings live in `src/surgibot/config.py` and read from the environment (via `.env`).
+Important keys:
+
+- `SURGIBOT_API_HOST`, `SURGIBOT_API_PORT`, `SURGIBOT_SECRET` – Flask/Waitress server settings.
+- `SURGIBOT_CLIENT_HOST`, `SURGIBOT_CLIENT_PORT`, `SURGIBOT_CLIENT_TIMEOUT` – client defaults.
+- `SURGIBOT_ANNOUNCE_MINUTES`, `SURGIBOT_AUTO_DELETE_MIN`, `SURGIBOT_ANNOUNCE_TTL` – announcement cadence.
+- `SURGIBOT_AUDIO_CACHE`, `SURGIBOT_DATA_DIR`, `SURGIBOT_LOG_DIR` – local paths for caches and logs.
+- `SURGIBOT_SPREADSHEET_ID`, `SURGIBOT_GCP_CREDENTIALS_*` – optional Google Sheets integration.
+
+Defaults in `.env.example` preserve the previous behaviour so the application still works out-of-the-box
+on `http://127.0.0.1:8088` using the historical secret token.
+
+## Troubleshooting
+- Ensure `assets/cache/` and `data/` are writable; the audio worker caches synthesized announcements here and
+  SQLite databases use `data/` with WAL mode.
+- Audio playback relies on `pygame`. On headless servers consider installing a dummy audio driver
+  or disable announcements via configuration.
+- Google Sheets is optional. If credentials are absent the server logs a warning and continues without syncing.
+
+Refer to `CHANGELOG.md` for a summary of the recent refactor work.
