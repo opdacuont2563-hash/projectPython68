@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
 from datetime import datetime, timedelta, time as dtime, date
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import requests
 
@@ -321,7 +322,11 @@ DEFAULT_PORT = CONFIG.client_port
 DEFAULT_TOKEN = CONFIG.client_secret
 
 # === Runner pickup service (FastAPI) ===
-RUNNER_BASE = os.getenv("SURGIBOT_RUNNER_BASE_URL", "http://127.0.0.1:8777").rstrip("/")
+RUNNER_PORT = CONFIG.runner_port
+RUNNER_BASE_DEFAULT = (CONFIG.runner_base_url or "").rstrip("/")
+if not RUNNER_BASE_DEFAULT:
+    RUNNER_BASE_DEFAULT = f"http://{DEFAULT_HOST}:{RUNNER_PORT}".rstrip("/")
+_RUNNER_SCHEME_DEFAULT = urlparse(RUNNER_BASE_DEFAULT).scheme or "http"
 RUNNER_UPDATE_API = "/runner/update"
 RUNNER_HEALTH_API = "/health"
 RUNNER_LIST_API = "/runner/list"
@@ -330,10 +335,31 @@ RUNNER_ARRIVE_API = "/runner/arrive"
 RUNNER_FINISH_API = "/runner/finish"
 
 
-def runner_health_ok(timeout: float = 0.8) -> bool:
+def _resolve_runner_base(base_url: Optional[str] = None) -> str:
+    raw = (base_url or "").strip()
+    if not raw:
+        return RUNNER_BASE_DEFAULT
+    candidate = raw
+    if "://" not in candidate:
+        candidate = f"{_RUNNER_SCHEME_DEFAULT}://{candidate}"
+    parsed = urlparse(candidate)
+    scheme = parsed.scheme or _RUNNER_SCHEME_DEFAULT
+    host = parsed.hostname or ""
+    if not host:
+        return RUNNER_BASE_DEFAULT
+    if host in {"0.0.0.0", ""}:
+        host = "127.0.0.1"
+    port = parsed.port or RUNNER_PORT
+    if port:
+        return f"{scheme}://{host}:{port}".rstrip("/")
+    return f"{scheme}://{host}".rstrip("/")
+
+
+def runner_health_ok(base_url: Optional[str] = None, timeout: float = 0.8) -> bool:
     try:
         sess = SESSION_MANAGER.get()
-        r = sess.get(f"{RUNNER_BASE}{RUNNER_HEALTH_API}", timeout=timeout)
+        base = _resolve_runner_base(base_url)
+        r = sess.get(f"{base}{RUNNER_HEALTH_API}", timeout=timeout)
         return bool(r.ok)
     except requests.RequestException:
         return False
@@ -361,10 +387,11 @@ RUNNER_STATUS_COLORS = {
 }
 
 
-def _fetch_runner_status_map(day: str) -> Dict[str, dict]:
+def _fetch_runner_status_map(day: str, base_url: Optional[str] = None) -> Dict[str, dict]:
     try:
+        base = _resolve_runner_base(base_url)
         resp = requests.get(
-            f"{RUNNER_BASE}{RUNNER_LIST_API}",
+            f"{base}{RUNNER_LIST_API}",
             params={"date": day},
             timeout=2.0,
             headers={"Accept": "application/json"},
@@ -2402,6 +2429,21 @@ class Main(QtWidgets.QWidget):
         except Exception:
             return ClientHTTP()
 
+    def _runner_base(self) -> str:
+        override = os.getenv("SURGIBOT_RUNNER_BASE_URL")
+        if override and override.strip():
+            return _resolve_runner_base(override)
+
+        host_text = self.ent_host.text().strip() or DEFAULT_HOST
+        parsed = urlparse(host_text if "://" in host_text else f"{_RUNNER_SCHEME_DEFAULT}://{host_text}")
+        host = parsed.hostname or host_text.split(":", 1)[0]
+        if not host:
+            host = DEFAULT_HOST
+        if host in {"0.0.0.0", ""}:
+            host = "127.0.0.1"
+        scheme = parsed.scheme or _RUNNER_SCHEME_DEFAULT
+        return _resolve_runner_base(f"{scheme}://{host}")
+
     def _on_health(self):
         try:
             self._client().health(); self._chip(True)
@@ -2616,14 +2658,15 @@ class Main(QtWidgets.QWidget):
         if not entries:
             return (0, [])
 
+        base = self._runner_base()
         if runner_ready is None:
-            runner_ready = runner_health_ok()
+            runner_ready = runner_health_ok(base)
         if not runner_ready:
             return (0, [])
 
         ok = 0
         failed: List[str] = []
-        url = f"{RUNNER_BASE}{RUNNER_UPDATE_API}"
+        url = f"{base}{RUNNER_UPDATE_API}"
 
         for entry in entries:
             payload = self._entry_to_runner_payload(entry)
@@ -2676,7 +2719,7 @@ class Main(QtWidgets.QWidget):
     def _runner_ack(self, pickup_id: str, user: str) -> bool:
         try:
             resp = requests.post(
-                f"{RUNNER_BASE}{RUNNER_ACK_API}",
+                f"{self._runner_base()}{RUNNER_ACK_API}",
                 json={"pickup_id": pickup_id, "user": user},
                 timeout=2.0,
                 headers={"Accept": "application/json"},
@@ -2688,7 +2731,7 @@ class Main(QtWidgets.QWidget):
     def _runner_arrive(self, pickup_id: str, user: str) -> bool:
         try:
             resp = requests.post(
-                f"{RUNNER_BASE}{RUNNER_ARRIVE_API}",
+                f"{self._runner_base()}{RUNNER_ARRIVE_API}",
                 json={"pickup_id": pickup_id, "user": user},
                 timeout=2.0,
                 headers={"Accept": "application/json"},
@@ -2700,7 +2743,7 @@ class Main(QtWidgets.QWidget):
     def _runner_finish(self, pickup_id: str, user: str = "ระบบ") -> bool:
         try:
             resp = requests.post(
-                f"{RUNNER_BASE}{RUNNER_FINISH_API}",
+                f"{self._runner_base()}{RUNNER_FINISH_API}",
                 json={"pickup_id": pickup_id, "user": user},
                 timeout=2.0,
                 headers={"Accept": "application/json"},
@@ -2732,7 +2775,8 @@ class Main(QtWidgets.QWidget):
         if not pid:
             self.toast.show_toast("ไม่พบข้อมูล OR/HN สำหรับ Runner")
             return
-        if not runner_health_ok():
+        base = self._runner_base()
+        if not runner_health_ok(base):
             self.toast.show_toast("ไม่สามารถเชื่อมต่อ Runner ได้")
             return
         user = self._ask_runner_name()
@@ -2756,12 +2800,13 @@ class Main(QtWidgets.QWidget):
             SweetAlert.info(self, "ไม่มีรายการ", "ยังไม่มีเคสของวันที่เลือกที่จะส่งให้ Runner")
             return
 
-        runner_ready = runner_health_ok()
+        base = self._runner_base()
+        runner_ready = runner_health_ok(base)
         if not runner_ready:
             SweetAlert.warning(
                 self,
                 "ไม่สามารถเชื่อมต่อ",
-                f"เชื่อมต่อ Runner ไม่ได้ (ตรวจสอบ {RUNNER_BASE})",
+                f"เชื่อมต่อ Runner ไม่ได้ (ตรวจสอบ {base})",
             )
             return
 
@@ -2782,8 +2827,11 @@ class Main(QtWidgets.QWidget):
                 f"สำเร็จ {ok} • ล้มเหลว {len(failed)}\n(HN: {', '.join(failed[:10])}{' …' if len(failed) > 10 else ''})",
             )
         else:
-            SweetAlert.warning(self, "ไม่สำเร็จ",
-                               f"ส่งให้ Runner ไม่ได้เลย — ตรวจสอบว่าเซิร์ฟเวอร์ Runner เปิดอยู่ที่ {RUNNER_BASE} หรือไม่")
+            SweetAlert.warning(
+                self,
+                "ไม่สำเร็จ",
+                f"ส่งให้ Runner ไม่ได้เลย — ตรวจสอบว่าเซิร์ฟเวอร์ Runner เปิดอยู่ที่ {base} หรือไม่",
+            )
 
         self._render_tree2()
 
@@ -3704,10 +3752,11 @@ class Main(QtWidgets.QWidget):
             runner_status_map: Dict[str, dict] = {}
             runner_ready = False
             if entries_for_day:
-                runner_ready = runner_health_ok()
+                base = self._runner_base()
+                runner_ready = runner_health_ok(base)
                 if runner_ready:
                     self._push_rows_to_runner(entries_for_day, runner_ready=True)
-                    runner_status_map = _fetch_runner_status_map(str(base_date))
+                    runner_status_map = _fetch_runner_status_map(str(base_date), base)
                     self._auto_finish_runner_cases(entries_for_day, runner_status_map)
             self._runner_status_cache = runner_status_map
 
