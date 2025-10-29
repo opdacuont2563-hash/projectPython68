@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import weakref
 from typing import Any, Callable
 
 import requests
@@ -85,7 +86,7 @@ if QtCore:
         def __init__(self, fn: Callable[[], Any], receiver: "QtCore.QObject", success_slot: str, error_slot: str) -> None:
             super().__init__()
             self.fn = fn
-            self.receiver = receiver
+            self._receiver_ref = weakref.ref(receiver)
             self.success_slot = success_slot
             self.error_slot = error_slot
 
@@ -93,19 +94,27 @@ if QtCore:
             try:
                 result = self.fn()
             except BaseException as exc:
-                QtCore.QMetaObject.invokeMethod(
-                    self.receiver,
-                    self.error_slot,
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(object, exc),
-                )
+                self._queue_callback(self.error_slot, exc)
             else:
-                QtCore.QMetaObject.invokeMethod(
-                    self.receiver,
-                    self.success_slot,
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(object, result),
-                )
+                self._queue_callback(self.success_slot, result)
+
+        def _queue_callback(self, slot_name: str, payload: Any) -> None:
+            receiver = self._receiver_ref()
+            if receiver is None:
+                logger.debug("Receiver for %s no longer alive; dropping payload", slot_name)
+                return
+
+            def _deliver() -> None:
+                target = getattr(receiver, slot_name, None)
+                if target is None:
+                    logger.warning("Receiver missing slot %s; dropping payload", slot_name)
+                    return
+                try:
+                    target(payload)
+                except Exception as callback_exc:  # pragma: no cover - GUI handler errors
+                    logger.error("Error delivering payload to %s: %s", slot_name, callback_exc, exc_info=callback_exc)
+
+            QtCore.QTimer.singleShot(0, _deliver)
 
 
 __all__ = ["SESSION_MANAGER", "NetworkTask", "SessionManager"]
