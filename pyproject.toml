@@ -1,0 +1,21 @@
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 120
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E203", "W503"]
+
+[tool.ruff.per-file-ignores]
+"src/surgibot/__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+show_error_codes = true
+ignore_missing_imports = true
+
+[tool.isort]
+profile = "black"
+line_length = 120
