@@ -118,7 +118,18 @@ from .workers.io_worker import SESSION_MANAGER, NetworkTask
 logger = get_logger(__name__)
 
 # ---------- Defaults ----------
-DEFAULT_HOST = CONFIG.client_host
+def _sanitize_host(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        parsed = urlparse(text)
+        if parsed.hostname:
+            return parsed.hostname
+    return text
+
+
+DEFAULT_HOST = _sanitize_host(getattr(CONFIG, "client_host", None)) or "127.0.0.1"
 DEFAULT_PORT = CONFIG.client_port
 DEFAULT_TOKEN = CONFIG.client_secret
 DEFAULT_TIMEOUT = CONFIG.client_timeout
@@ -1090,7 +1101,8 @@ class Main(QtWidgets.QWidget):
 
         # Seed settings inputs with CLI defaults before loading persisted values
         try:
-            self.ent_host.setText(str(host))
+            host_prefill = self._normalize_host_input(host if isinstance(host, str) else str(host))
+            self.ent_host.setText(host_prefill or DEFAULT_HOST)
         except Exception:
             self.ent_host.setText(str(DEFAULT_HOST))
         try:
@@ -1143,9 +1155,17 @@ class Main(QtWidgets.QWidget):
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         lay.addWidget(btns)
         def _save():
-            self.ent_host.setText(host.text().strip())
-            self.ent_port.setText(port.text().strip())
-            self.ent_token.setText(token.text().strip())
+            host_text = self._normalize_host_input(host.text()) or DEFAULT_HOST
+            port_raw = (port.text() or "").strip()
+            try:
+                port_val = int(port_raw) if port_raw else DEFAULT_PORT
+            except Exception:
+                port_val = DEFAULT_PORT
+            token_text = token.text().strip() or DEFAULT_TOKEN
+
+            self.ent_host.setText(host_text)
+            self.ent_port.setText(str(port_val))
+            self.ent_token.setText(token_text)
             self._save_settings()
             self._on_reconnect_clicked()
             dlg.accept()
@@ -1816,20 +1836,68 @@ QLabel { color:#fff; font-weight: 900; }
                 f"QPushButton:hover{{background:{color if btn.isChecked() else '#eef2f7'};}}"
             )
 
+    def _normalize_host_input(self, text: str | None) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        if "://" in raw:
+            parsed = urlparse(raw)
+            if parsed.hostname:
+                return parsed.hostname
+        return raw
+
+    def _effective_host(self) -> str:
+        host = self._normalize_host_input(self.ent_host.text())
+        return host or DEFAULT_HOST
+
+    def _effective_port(self) -> int:
+        raw = (self.ent_port.text() or "").strip()
+        try:
+            if raw:
+                return int(raw)
+        except Exception:
+            pass
+        return DEFAULT_PORT
+
+    def _effective_token(self) -> str:
+        token = (self.ent_token.text() or "").strip()
+        return token or DEFAULT_TOKEN
+
     # ---------- Settings ----------
     def _load_settings(self):
         s = QSettings("ORNBH", "SurgiBotClient")
-        self.ent_host.setText(s.value("host", self.ent_host.text()))
-        self.ent_port.setText(s.value("port", self.ent_port.text()))
-        self.ent_token.setText(s.value("token", self.ent_token.text()))
+        host_val = s.value("host", "")
+        host_text = self._normalize_host_input(host_val if isinstance(host_val, str) else str(host_val or ""))
+        if host_text:
+            self.ent_host.setText(host_text)
+        elif not (self.ent_host.text() or "").strip():
+            self.ent_host.setText(DEFAULT_HOST)
+
+        port_val = s.value("port", "")
+        port_text = str(port_val) if port_val not in (None, "") else ""
+        try:
+            port_num = int(port_text) if port_text else DEFAULT_PORT
+        except Exception:
+            port_num = DEFAULT_PORT
+        self.ent_port.setText(str(port_num))
+
+        token_val = s.value("token", "")
+        token_text = str(token_val).strip() if isinstance(token_val, (str, bytes)) else ""
+        if isinstance(token_val, bytes):
+            token_text = token_val.decode("utf-8", "ignore").strip()
+        if not token_text:
+            token_text = (self.ent_token.text() or "").strip() or DEFAULT_TOKEN
+        self.ent_token.setText(token_text)
         if g := s.value("geometry"):
             try: self.restoreGeometry(g)
             except Exception: pass
 
     def _save_settings(self):
         s = QSettings("ORNBH", "SurgiBotClient")
-        s.setValue("host", self.ent_host.text()); s.setValue("port", self.ent_port.text())
-        s.setValue("token", self.ent_token.text()); s.setValue("geometry", self.saveGeometry())
+        s.setValue("host", self._effective_host());
+        s.setValue("port", str(self._effective_port()))
+        s.setValue("token", self._effective_token());
+        s.setValue("geometry", self.saveGeometry())
 
     # ---------- Persist monitor state ----------
     def _save_persisted_monitor_state(self, rows: List[dict]):
@@ -2474,25 +2542,21 @@ QLabel { color:#fff; font-weight: 900; }
 
     # ---------- WebSocket ----------
     def _parse_endpoint(self):
-        host_text = self.ent_host.text().strip()
-        port_text = self.ent_port.text().strip()
-        token = self.ent_token.text().strip() or DEFAULT_TOKEN
+        host_text = self._normalize_host_input(self.ent_host.text())
+        token = self._effective_token()
 
         raw = host_text or DEFAULT_HOST
         candidate = raw if "://" in raw else f"http://{raw}"
         parsed = urlparse(candidate)
 
         scheme = parsed.scheme or "http"
-        host = parsed.hostname or DEFAULT_HOST
+        host = parsed.hostname or self._normalize_host_input(raw) or DEFAULT_HOST
 
         port: int | None
         if parsed.port is not None:
             port = parsed.port
         else:
-            try:
-                port = int(port_text) if port_text else DEFAULT_PORT
-            except Exception:
-                port = DEFAULT_PORT
+            port = self._effective_port()
 
         path = parsed.path.rstrip("/") if parsed.path else ""
 

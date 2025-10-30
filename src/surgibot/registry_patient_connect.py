@@ -318,7 +318,18 @@ class FastSearchIndex:
 
 
 # ---------------------- Config ----------------------
-DEFAULT_HOST = CONFIG.client_host
+def _sanitize_host(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        parsed = urlparse(text)
+        if parsed.hostname:
+            return parsed.hostname
+    return text
+
+
+DEFAULT_HOST = _sanitize_host(getattr(CONFIG, "client_host", None)) or "127.0.0.1"
 DEFAULT_PORT = CONFIG.client_port
 DEFAULT_TOKEN = CONFIG.client_secret
 
@@ -358,7 +369,7 @@ def _resolve_runner_base(base_url: Optional[str] = None) -> str:
     if not host:
         return RUNNER_BASE_DEFAULT
     if host in {"0.0.0.0", ""}:
-        host = "127.0.0.1"
+        host = DEFAULT_HOST
     port = parsed.port or RUNNER_PORT
     if port:
         return f"{scheme}://{host}:{port}".rstrip("/")
@@ -2428,7 +2439,8 @@ class Main(QtWidgets.QWidget):
         add_shadow(server_bar)
         hb = QtWidgets.QHBoxLayout(server_bar);
         hb.setContentsMargins(8, 8, 8, 8)
-        self.ent_host = QtWidgets.QLineEdit("127.0.0.1");
+        default_host_text = DEFAULT_HOST or "127.0.0.1"
+        self.ent_host = QtWidgets.QLineEdit(default_host_text);
         self.ent_host.setMaximumWidth(180);
         self.ent_host.setEchoMode(QtWidgets.QLineEdit.Normal)
         self.ent_port = QtWidgets.QLineEdit(str(DEFAULT_PORT));
@@ -2637,11 +2649,36 @@ class Main(QtWidgets.QWidget):
             self.cfg.sync()
 
     # ---------- helpers ----------
+    def _normalize_host_input(self, text: str | None) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        if "://" in raw:
+            parsed = urlparse(raw)
+            if parsed.hostname:
+                return parsed.hostname
+        return raw
+
+    def _effective_host(self) -> str:
+        host = self._normalize_host_input(self.ent_host.text())
+        return host or DEFAULT_HOST
+
+    def _effective_port(self) -> int:
+        raw = (self.ent_port.text() or "").strip()
+        try:
+            if raw:
+                return int(raw)
+        except Exception:
+            pass
+        return DEFAULT_PORT
+
+    def _effective_token(self) -> str:
+        token = (self.ent_token.text() or "").strip()
+        return token or DEFAULT_TOKEN
+
     def _client(self):
         try:
-            return ClientHTTP(self.ent_host.text().strip() or "127.0.0.1",
-                              int(self.ent_port.text().strip() or DEFAULT_PORT),
-                              self.ent_token.text().strip() or DEFAULT_TOKEN)
+            return ClientHTTP(self._effective_host(), self._effective_port(), self._effective_token())
         except Exception:
             return ClientHTTP()
 
@@ -2653,13 +2690,13 @@ class Main(QtWidgets.QWidget):
         if override and override.strip():
             return _resolve_runner_base(override)
 
-        host_text = self.ent_host.text().strip() or DEFAULT_HOST
+        host_text = self._effective_host()
         parsed = urlparse(host_text if "://" in host_text else f"{_RUNNER_SCHEME_DEFAULT}://{host_text}")
         host = parsed.hostname or host_text.split(":", 1)[0]
         if not host:
             host = DEFAULT_HOST
         if host in {"0.0.0.0", ""}:
-            host = "127.0.0.1"
+            host = DEFAULT_HOST
         scheme = parsed.scheme or _RUNNER_SCHEME_DEFAULT
 
         cfg_base = (CONFIG.runner_base_url or "").strip()
@@ -2667,7 +2704,7 @@ class Main(QtWidgets.QWidget):
             parsed_cfg = urlparse(cfg_base if "://" in cfg_base else f"{scheme}://{cfg_base}")
             cfg_host = parsed_cfg.hostname or ""
             if cfg_host in {"0.0.0.0", ""}:
-                cfg_host = "127.0.0.1"
+                cfg_host = DEFAULT_HOST
             if cfg_host and (cfg_host == host or cfg_host not in {DEFAULT_HOST, "127.0.0.1"}):
                 return _resolve_runner_base(cfg_base)
 
@@ -2839,7 +2876,7 @@ class Main(QtWidgets.QWidget):
         self._render_tree2()
 
     def _ws_url(self):
-        return f"ws://{self.ent_host.text().strip() or '127.0.0.1'}:{int(self.ent_port.text().strip() or DEFAULT_PORT)}{API_WS}?token={self.ent_token.text().strip() or DEFAULT_TOKEN}"
+        return f"ws://{self._effective_host()}:{self._effective_port()}{API_WS}?token={self._effective_token()}"
 
     def _start_ws(self):
         try:
@@ -5166,7 +5203,7 @@ def main():
     app.setOrganizationName(ORG_NAME);
     app.setWindowIcon(_load_app_icon())
     ap = argparse.ArgumentParser();
-    ap.add_argument("--host", default="127.0.0.1");
+    ap.add_argument("--host", default=DEFAULT_HOST);
     ap.add_argument("--port", type=int, default=DEFAULT_PORT);
     ap.add_argument("--token", default=DEFAULT_TOKEN)
     a = ap.parse_args()
