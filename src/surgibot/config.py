@@ -36,6 +36,7 @@ class SurgiBotConfig:
     api_host: str = "0.0.0.0"
     api_port: int = 8088
     secret: str = "8HDYAANLgTyjbBK4JPGx1ooZbVC86_OMJ9uEXBm3EZTidUVyzhGiReaksGA0ites"
+    secret_from_env: bool = False
     client_host: str = "127.0.0.1"
     client_port: int = 8088
     client_timeout: float = 6.0
@@ -144,7 +145,9 @@ def load_config() -> SurgiBotConfig:
         api_port = int((env("SURGIBOT_API_PORT") or str(SurgiBotConfig.api_port)).strip())
     except (TypeError, ValueError):
         api_port = SurgiBotConfig.api_port
-    secret = (env("SURGIBOT_SECRET") or SurgiBotConfig.secret).strip() or SurgiBotConfig.secret
+    raw_secret = env("SURGIBOT_SECRET")
+    secret_from_env = bool(raw_secret and raw_secret.strip())
+    secret = (raw_secret or SurgiBotConfig.secret).strip() or SurgiBotConfig.secret
 
     raw_client_host = env("SURGIBOT_CLIENT_HOST")
     if raw_client_host is not None and raw_client_host.strip():
@@ -204,6 +207,7 @@ def load_config() -> SurgiBotConfig:
         api_host=api_host,
         api_port=api_port,
         secret=secret,
+        secret_from_env=secret_from_env,
         client_host=client_host,
         client_port=client_port,
         client_timeout=client_timeout,

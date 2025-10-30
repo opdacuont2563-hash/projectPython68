@@ -133,6 +133,7 @@ DEFAULT_HOST = _sanitize_host(getattr(CONFIG, "client_host", None)) or "127.0.0.
 DEFAULT_PORT = CONFIG.client_port
 DEFAULT_TOKEN = CONFIG.client_secret
 DEFAULT_TIMEOUT = CONFIG.client_timeout
+SECRET_FROM_ENV = bool(getattr(CONFIG, "secret_from_env", False))
 
 _LOCAL_HOST_SENTINELS = {"127.0.0.1", "localhost", "0.0.0.0"}
 
@@ -1954,13 +1955,27 @@ QLabel { color:#fff; font-weight: 900; }
         token_text = str(token_val).strip() if isinstance(token_val, (str, bytes)) else ""
         if isinstance(token_val, bytes):
             token_text = token_val.decode("utf-8", "ignore").strip()
+
+        token_dirty = False
         if not token_text:
             token_text = (self.ent_token.text() or "").strip() or DEFAULT_TOKEN
+            token_dirty = True
+
+        if SECRET_FROM_ENV and DEFAULT_TOKEN:
+            if token_text != DEFAULT_TOKEN:
+                token_text = DEFAULT_TOKEN
+                token_dirty = True
+
         self.ent_token.setText(token_text)
 
-        if settings_dirty:
+        if settings_dirty or token_dirty or SECRET_FROM_ENV:
             s.setValue("host", self.ent_host.text())
+            s.setValue("port", self.ent_port.text())
+            s.setValue("token", token_text)
+            s.setValue("secret_signature", token_text)
             s.sync()
+        else:
+            s.setValue("secret_signature", token_text)
 
         if g := s.value("geometry"):
             try:
@@ -1972,8 +1987,10 @@ QLabel { color:#fff; font-weight: 900; }
         s = QSettings("ORNBH", "SurgiBotClient")
         s.setValue("host", self._effective_host());
         s.setValue("port", str(self._effective_port()))
-        s.setValue("token", self._effective_token());
+        token = self._effective_token()
+        s.setValue("token", token);
         s.setValue("geometry", self.saveGeometry())
+        s.setValue("secret_signature", token)
 
     # ---------- Persist monitor state ----------
     def _save_persisted_monitor_state(self, rows: List[dict]):
