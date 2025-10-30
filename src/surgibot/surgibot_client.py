@@ -150,6 +150,9 @@ STATUS_OP_START = "กำลังผ่าตัด"
 STATUS_OP_END = "กำลังพักฟื้น"
 STATUS_RETURNING = "กำลังส่งกลับตึก"
 
+# Feature toggles
+ENABLE_OR_STICKY = False
+
 STATUS_COLORS = {
     "รอผ่าตัด": "#fde047",
     "กำลังผ่าตัด": "#ef4444",
@@ -1774,11 +1777,14 @@ QCheckBox { color:#0f172a; }
         self.tree_sched.itemSelectionChanged.connect(self._on_sched_item_clicked_from_selection)
         self.tree_sched.setStyleSheet(self.tree_sched.styleSheet() + "\nQTreeView::item{ min-height: 34px; }")
 
-        # --- OR sticky badge overlay ---
-        self._orSticky = QtWidgets.QFrame(self.tree_sched.viewport())
-        self._orSticky.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
-        self._orSticky.hide()
-        self._orSticky.setStyleSheet("""
+        # --- OR sticky badge overlay (optional) ---
+        self._orSticky = None
+        self._orStickyLabel = None
+        if ENABLE_OR_STICKY:
+            self._orSticky = QtWidgets.QFrame(self.tree_sched.viewport())
+            self._orSticky.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            self._orSticky.hide()
+            self._orSticky.setStyleSheet("""
 QFrame {
     background: qlineargradient(x1:0,y1:0, x2:1,y2:1, stop:0 #4f86ff, stop:1 #2f64e9);
     border-radius: 14px;
@@ -1788,15 +1794,15 @@ QFrame {
 }
 QLabel { color:#fff; font-weight: 900; }
 """)
-        sticky_layout = QtWidgets.QHBoxLayout(self._orSticky)
-        sticky_layout.setContentsMargins(12, 6, 12, 6)
-        self._orStickyLabel = QtWidgets.QLabel("OR")
-        sticky_layout.addWidget(self._orStickyLabel)
+            sticky_layout = QtWidgets.QHBoxLayout(self._orSticky)
+            sticky_layout.setContentsMargins(12, 6, 12, 6)
+            self._orStickyLabel = QtWidgets.QLabel("OR")
+            sticky_layout.addWidget(self._orStickyLabel)
 
-        self.tree_sched.verticalScrollBar().valueChanged.connect(self._update_or_sticky)
-        self.tree_sched.horizontalScrollBar().valueChanged.connect(self._update_or_sticky)
-        self.tree_sched.itemExpanded.connect(lambda *_: self._update_or_sticky())
-        self.tree_sched.itemCollapsed.connect(lambda *_: self._update_or_sticky())
+            self.tree_sched.verticalScrollBar().valueChanged.connect(self._update_or_sticky)
+            self.tree_sched.horizontalScrollBar().valueChanged.connect(self._update_or_sticky)
+            self.tree_sched.itemExpanded.connect(lambda *_: self._update_or_sticky())
+            self.tree_sched.itemCollapsed.connect(lambda *_: self._update_or_sticky())
         self.tree_sched.viewport().installEventFilter(self)
 
         # Monitor
@@ -2205,9 +2211,12 @@ QLabel { color:#fff; font-weight: 900; }
         return None
 
     def _update_or_sticky(self):
+        if not ENABLE_OR_STICKY:
+            return
         tree = getattr(self, "tree_sched", None)
         sticky = getattr(self, "_orSticky", None)
-        if tree is None or sticky is None:
+        label = getattr(self, "_orStickyLabel", None)
+        if tree is None or sticky is None or label is None:
             return
 
         item = self._first_visible_item()
@@ -2229,7 +2238,7 @@ QLabel { color:#fff; font-weight: 900; }
             sticky.hide()
             return
 
-        self._orStickyLabel.setText(or_text)
+        label.setText(or_text)
         sticky.adjustSize()
         width = max(120, sticky.sizeHint().width())
         height = 32
