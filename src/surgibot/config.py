@@ -34,7 +34,7 @@ def _load_env_files() -> None:
 class SurgiBotConfig:
     api_host: str = "0.0.0.0"
     api_port: int = 8088
-    secret: str = "uTCoBelMyNfSSNmUulT_Kz6zrrCVkvD578MxEuLKZoaaXX0pVlpAD8toYHBxsFxI"
+    secret: str = "8HDYAANLgTyjbBK4JPGx1ooZbVC86_OMJ9uEXBm3EZTidUVyzhGiReaksGA0ites"
     client_host: str = "127.0.0.1"
     client_port: int = 8088
     client_timeout: float = 6.0
@@ -125,17 +125,44 @@ def _parse_bool(value: Optional[str], default: bool = False) -> bool:
     return default
 
 
+def _clean_host(value: str) -> str:
+    text = value.strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        parsed = urlparse(text)
+        host = parsed.hostname or ""
+        return host or text
+    return text
+
+
 def load_config() -> SurgiBotConfig:
     _load_env_files()
     env = os.environ.get
-    api_host = env("SURGIBOT_API_HOST", SurgiBotConfig.api_host)
-    api_port = int(env("SURGIBOT_API_PORT", str(SurgiBotConfig.api_port)))
-    secret = env("SURGIBOT_SECRET", SurgiBotConfig.secret)
+    raw_api_host = env("SURGIBOT_API_HOST")
+    api_host = _clean_host(raw_api_host or SurgiBotConfig.api_host)
+    try:
+        api_port = int((env("SURGIBOT_API_PORT") or str(SurgiBotConfig.api_port)).strip())
+    except (TypeError, ValueError):
+        api_port = SurgiBotConfig.api_port
+    secret = (env("SURGIBOT_SECRET") or SurgiBotConfig.secret).strip() or SurgiBotConfig.secret
 
-    client_host = env("SURGIBOT_CLIENT_HOST", SurgiBotConfig.client_host)
-    client_port = int(env("SURGIBOT_CLIENT_PORT", str(SurgiBotConfig.client_port)))
+    raw_client_host = env("SURGIBOT_CLIENT_HOST")
+    if raw_client_host is not None and raw_client_host.strip():
+        client_host = _clean_host(raw_client_host)
+    else:
+        fallback_host = _clean_host(api_host)
+        client_host = fallback_host if fallback_host not in {"", "0.0.0.0", "127.0.0.1"} else SurgiBotConfig.client_host
+
+    raw_client_port = env("SURGIBOT_CLIENT_PORT")
+    if raw_client_port is not None and raw_client_port.strip():
+        try:
+            client_port = int(raw_client_port.strip())
+        except ValueError:
+            client_port = SurgiBotConfig.client_port
+    else:
+        client_port = api_port if api_port else SurgiBotConfig.client_port
     client_timeout = float(env("SURGIBOT_CLIENT_TIMEOUT", str(SurgiBotConfig.client_timeout)))
-    client_base = env("SURGIBOT_CLIENT_BASE", f"http://{client_host}:{client_port}")
+    raw_client_base = env("SURGIBOT_CLIENT_BASE")
+    client_base = raw_client_base.strip() if raw_client_base and raw_client_base.strip() else f"http://{client_host}:{client_port}"
     refresh_ms = int(env("SURGIBOT_CLIENT_REFRESH_MS", str(SurgiBotConfig.client_refresh_interval_ms)))
     debounce_ms = int(env("SURGIBOT_CLIENT_DEBOUNCE_MS", str(SurgiBotConfig.client_debounce_ms)))
     auto_purge_min = int(env("SURGIBOT_CLIENT_PURGE_MINUTES", str(SurgiBotConfig.client_auto_purge_minutes)))
