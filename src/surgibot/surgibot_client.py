@@ -11,7 +11,7 @@ import os, sys, json, argparse
 import math
 import time
 from pathlib import Path
-from typing import Union, List, Dict, Optional
+from typing import Union, List, Dict, Optional, Any
 from datetime import datetime, timedelta, time as dtime, date as ddate
 from urllib.parse import urlparse
 
@@ -378,6 +378,52 @@ def _parse_date(date_str: str):
             continue
     if cleaned.startswith(datetime.now().date().isoformat()):
         return datetime.now().date()
+
+
+def _normalize_ci_key(name: str) -> str:
+    if not isinstance(name, str):
+        return ""
+    return (
+        name.strip()
+        .lower()
+        .replace(" ", "")
+        .replace("(", "")
+        .replace(")", "")
+        .replace("_", "")
+    )
+
+
+def _build_ci_lookup(record: Dict[str, Any]) -> Dict[str, Any]:
+    lookup: Dict[str, Any] = {}
+    for key, value in record.items():
+        if isinstance(key, str):
+            lookup[_normalize_ci_key(key)] = value
+    return lookup
+
+
+def _ci_get(lookup: Dict[str, Any], *names: str):
+    for name in names:
+        norm = _normalize_ci_key(name)
+        if norm in lookup:
+            return lookup[norm]
+    return None
+
+
+def _parse_hhmm_today(txt: str | None) -> Optional[str]:
+    if not isinstance(txt, str):
+        return None
+    text = txt.strip()
+    if not text or ":" not in text:
+        return None
+    try:
+        hh_str, mm_str = text.split(":", 1)
+        hh = max(0, min(23, int(hh_str)))
+        mm = max(0, min(59, int(mm_str)))
+        now = datetime.now()
+        dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        return dt.isoformat(timespec="seconds")
+    except Exception:
+        return None
     return None
 
 # ---------- HTTP ----------
@@ -2314,43 +2360,63 @@ QLabel { color:#fff; font-weight: 900; }
             if not isinstance(it, dict):
                 continue
 
-            hn_full = str(it.get("hn_full") or it.get("hn") or "").strip()
+            lookup = _build_ci_lookup(it)
+
+            hn_full = str(
+                _ci_get(lookup, "hn_full", "hn", "id(mask)") or ""
+            ).strip()
 
             pid = str(
-                it.get("patient_id")
-                or it.get("pid")
-                or it.get("queue_id")
+                _ci_get(lookup, "patient_id", "pid", "queue_id", "patientid")
                 or ""
             ).strip()
             if not pid:
-                or_room = str(it.get("or") or it.get("or_room") or "").strip()
-                q = str(it.get("queue") or it.get("q") or "").strip()
+                or_room = str(_ci_get(lookup, "or", "or_room") or "").strip()
+                q = str(_ci_get(lookup, "queue", "q") or "").strip()
                 if or_room and q:
                     pid = f"{or_room}-{q}"
                 else:
                     pid = f"row-{i}"
 
-            status_raw = str(
-                it.get("status")
-                or it.get("state")
-                or it.get("operation_status")
-                or it.get("op_status")
-                or ""
-            ).strip().lower()
+            status_raw_val = _ci_get(
+                lookup,
+                "status",
+                "สถานะ",
+                "operation_status",
+                "op_status",
+            )
+            if status_raw_val is None or str(status_raw_val).strip() == "":
+                status_raw_val = _ci_get(lookup, "state")
+            status_raw = str(status_raw_val or "").strip().lower()
+
             status_map = {
-                "รอผ่าตัด": "รอผ่าตัด", "waiting": "รอผ่าตัด",
-                "queued": "รอผ่าตัด", "pending": "รอผ่าตัด",
-                "กำลังผ่าตัด": "กำลังผ่าตัด", "operating": "กำลังผ่าตัด",
-                "in operation": "กำลังผ่าตัด", "in_operation": "กำลังผ่าตัด",
-                "in-surgery": "กำลังผ่าตัด", "surgery": "กำลังผ่าตัด",
+                "รอผ่าตัด": "รอผ่าตัด",
+                "waiting": "รอผ่าตัด",
+                "queued": "รอผ่าตัด",
+                "pending": "รอผ่าตัด",
+                "กำลังผ่าตัด": "กำลังผ่าตัด",
+                "operating": "กำลังผ่าตัด",
+                "inoperation": "กำลังผ่าตัด",
+                "in operation": "กำลังผ่าตัด",
+                "in_operation": "กำลังผ่าตัด",
+                "in-surgery": "กำลังผ่าตัด",
+                "surgery": "กำลังผ่าตัด",
                 "ongoing": "กำลังผ่าตัด",
-                "กำลังพักฟื้น": "กำลังพักฟื้น", "recovery": "กำลังพักฟื้น",
-                "pacu": "กำลังพักฟื้น", "post-op": "กำลังพักฟื้น",
+                "กำลังพักฟื้น": "กำลังพักฟื้น",
+                "recovery": "กำลังพักฟื้น",
+                "pacu": "กำลังพักฟื้น",
+                "post-op": "กำลังพักฟื้น",
+                "postop": "กำลังพักฟื้น",
                 "post_operation": "กำลังพักฟื้น",
-                "กำลังส่งกลับตึก": "กำลังส่งกลับตึก", "sending back": "กำลังส่งกลับตึก",
-                "transfer": "กำลังส่งกลับตึก", "returning": "กำลังส่งกลับตึก",
-                "เลื่อนการผ่าตัด": "เลื่อนการผ่าตัด", "postponed": "เลื่อนการผ่าตัด",
-                "deferred": "เลื่อนการผ่าตัด", "canceled": "เลื่อนการผ่าตัด",
+                "กำลังส่งกลับตึก": "กำลังส่งกลับตึก",
+                "sendingback": "กำลังส่งกลับตึก",
+                "sending back": "กำลังส่งกลับตึก",
+                "transfer": "กำลังส่งกลับตึก",
+                "returning": "กำลังส่งกลับตึก",
+                "เลื่อนการผ่าตัด": "เลื่อนการผ่าตัด",
+                "postponed": "เลื่อนการผ่าตัด",
+                "deferred": "เลื่อนการผ่าตัด",
+                "canceled": "เลื่อนการผ่าตัด",
                 "cancelled": "เลื่อนการผ่าตัด",
             }
             if status_raw in status_map:
@@ -2358,17 +2424,20 @@ QLabel { color:#fff; font-weight: 900; }
             else:
                 try:
                     idx = int(status_raw)
-                    map_idx = ["รอผ่าตัด", "กำลังผ่าตัด", "กำลังพักฟื้น", "กำลังส่งกลับตึก", "เลื่อนการผ่าตัด"]
+                    map_idx = [
+                        "รอผ่าตัด",
+                        "กำลังผ่าตัด",
+                        "กำลังพักฟื้น",
+                        "กำลังส่งกลับตึก",
+                        "เลื่อนการผ่าตัด",
+                    ]
                     status = map_idx[idx] if 0 <= idx < len(map_idx) else "รอผ่าตัด"
                 except Exception:
                     status = "รอผ่าตัด"
 
             ts_val = (
-                it.get("timestamp")
-                or it.get("ts")
-                or it.get("updated_at")
-                or it.get("created_at")
-                or it.get("time")
+                _ci_get(lookup, "timestamp", "ts", "updated_at", "created_at", "time")
+                or _ci_get(lookup, "starttime", "start_time")
                 or ""
             )
             ts_iso = ""
@@ -2376,19 +2445,20 @@ QLabel { color:#fff; font-weight: 900; }
                 if isinstance(ts_val, (int, float)):
                     ts_iso = datetime.fromtimestamp(float(ts_val)).isoformat(timespec="seconds")
                 elif isinstance(ts_val, str) and ts_val.strip():
-                    ts_iso = ts_val
+                    ts_iso = _parse_hhmm_today(ts_val) or ts_val.strip()
             except Exception:
                 ts_iso = ""
             if not _parse_iso(ts_iso):
-                ts_iso = datetime.now().isoformat(timespec="seconds")
+                fallback = _parse_hhmm_today(ts_val if isinstance(ts_val, str) else None)
+                ts_iso = fallback or datetime.now().isoformat(timespec="seconds")
 
-            eta_raw = it.get("eta_minutes", it.get("eta", it.get("eta_min", None)))
+            eta_raw = _ci_get(lookup, "eta_minutes", "eta", "eta_min", "eta(min)")
             try:
                 eta_minutes = int(eta_raw) if str(eta_raw).strip() != "" else None
             except Exception:
                 eta_minutes = None
 
-            rid = it.get("id") or (hn_full if hn_full else pid) or i
+            rid = _ci_get(lookup, "id") or (hn_full if hn_full else pid) or i
 
             rows.append({
                 "id": str(rid),
