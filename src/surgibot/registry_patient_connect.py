@@ -332,6 +332,7 @@ def _sanitize_host(value: str | None) -> str:
 DEFAULT_HOST = _sanitize_host(getattr(CONFIG, "client_host", None)) or "127.0.0.1"
 DEFAULT_PORT = CONFIG.client_port
 DEFAULT_TOKEN = CONFIG.client_secret
+LOCAL_HOST_SENTINELS = {"", "0.0.0.0", "127.0.0.1", "localhost"}
 
 # === Runner pickup service (FastAPI) ===
 RUNNER_ENABLED = bool(CONFIG.runner_enabled)
@@ -368,7 +369,7 @@ def _resolve_runner_base(base_url: Optional[str] = None) -> str:
     host = parsed.hostname or ""
     if not host:
         return RUNNER_BASE_DEFAULT
-    if host in {"0.0.0.0", ""}:
+    if host in LOCAL_HOST_SENTINELS:
         host = DEFAULT_HOST
     port = parsed.port or RUNNER_PORT
     if port:
@@ -2695,7 +2696,7 @@ class Main(QtWidgets.QWidget):
         host = parsed.hostname or host_text.split(":", 1)[0]
         if not host:
             host = DEFAULT_HOST
-        if host in {"0.0.0.0", ""}:
+        if host in LOCAL_HOST_SENTINELS:
             host = DEFAULT_HOST
         scheme = parsed.scheme or _RUNNER_SCHEME_DEFAULT
 
@@ -2703,7 +2704,7 @@ class Main(QtWidgets.QWidget):
         if cfg_base:
             parsed_cfg = urlparse(cfg_base if "://" in cfg_base else f"{scheme}://{cfg_base}")
             cfg_host = parsed_cfg.hostname or ""
-            if cfg_host in {"0.0.0.0", ""}:
+            if cfg_host in LOCAL_HOST_SENTINELS:
                 cfg_host = DEFAULT_HOST
             if cfg_host and (cfg_host == host or cfg_host not in {DEFAULT_HOST, "127.0.0.1"}):
                 return _resolve_runner_base(cfg_base)

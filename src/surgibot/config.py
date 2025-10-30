@@ -17,6 +17,7 @@ _ENV_LOADED = False
 
 _TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "f", "no", "n", "off"}
+_LOCAL_HOST_SENTINELS = {"", "0.0.0.0", "127.0.0.1", "localhost"}
 
 
 def _load_env_files() -> None:
@@ -101,13 +102,13 @@ def _normalize_runner_base(
             host = parsed.hostname or ""
             if not host:
                 host = candidate.split("://", 1)[-1].split("/", 1)[0]
-            if host in {"0.0.0.0", ""}:
+            if host in _LOCAL_HOST_SENTINELS:
                 host = "127.0.0.1"
             port = parsed.port or runner_port
             return f"{scheme}://{host}:{port}".rstrip("/")
 
     host = fallback_host or "127.0.0.1"
-    if host in {"0.0.0.0", ""}:
+    if host in _LOCAL_HOST_SENTINELS:
         host = "127.0.0.1"
     return f"{fallback_scheme}://{host}:{runner_port}".rstrip("/")
 
@@ -150,7 +151,7 @@ def load_config() -> SurgiBotConfig:
         client_host = _clean_host(raw_client_host)
     else:
         fallback_host = _clean_host(api_host)
-        client_host = fallback_host if fallback_host not in {"", "0.0.0.0", "127.0.0.1"} else SurgiBotConfig.client_host
+        client_host = fallback_host if fallback_host not in _LOCAL_HOST_SENTINELS else SurgiBotConfig.client_host
 
     raw_client_port = env("SURGIBOT_CLIENT_PORT")
     if raw_client_port is not None and raw_client_port.strip():

@@ -134,6 +134,8 @@ DEFAULT_PORT = CONFIG.client_port
 DEFAULT_TOKEN = CONFIG.client_secret
 DEFAULT_TIMEOUT = CONFIG.client_timeout
 
+_LOCAL_HOST_SENTINELS = {"127.0.0.1", "localhost", "0.0.0.0"}
+
 API_HEALTH = "/api/health"
 API_UPDATE = "/api/update"
 API_LIST   = "/api/list"
@@ -1866,12 +1868,27 @@ QLabel { color:#fff; font-weight: 900; }
     # ---------- Settings ----------
     def _load_settings(self):
         s = QSettings("ORNBH", "SurgiBotClient")
+
         host_val = s.value("host", "")
+        if isinstance(host_val, bytes):
+            host_val = host_val.decode("utf-8", "ignore")
         host_text = self._normalize_host_input(host_val if isinstance(host_val, str) else str(host_val or ""))
+        settings_dirty = False
+
         if host_text:
+            if (
+                host_text in _LOCAL_HOST_SENTINELS
+                and DEFAULT_HOST not in _LOCAL_HOST_SENTINELS
+                and host_text != DEFAULT_HOST
+            ):
+                host_text = DEFAULT_HOST
+                settings_dirty = True
             self.ent_host.setText(host_text)
-        elif not (self.ent_host.text() or "").strip():
-            self.ent_host.setText(DEFAULT_HOST)
+        else:
+            if not (self.ent_host.text() or "").strip():
+                self.ent_host.setText(DEFAULT_HOST)
+            if host_val not in (None, "") and DEFAULT_HOST:
+                settings_dirty = True
 
         port_val = s.value("port", "")
         port_text = str(port_val) if port_val not in (None, "") else ""
@@ -1888,9 +1905,16 @@ QLabel { color:#fff; font-weight: 900; }
         if not token_text:
             token_text = (self.ent_token.text() or "").strip() or DEFAULT_TOKEN
         self.ent_token.setText(token_text)
+
+        if settings_dirty:
+            s.setValue("host", self.ent_host.text())
+            s.sync()
+
         if g := s.value("geometry"):
-            try: self.restoreGeometry(g)
-            except Exception: pass
+            try:
+                self.restoreGeometry(g)
+            except Exception:
+                pass
 
     def _save_settings(self):
         s = QSettings("ORNBH", "SurgiBotClient")
