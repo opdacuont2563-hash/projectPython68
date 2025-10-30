@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import queue
 import threading
 import time
@@ -29,13 +30,36 @@ class AudioWorker:
         self._last_text: Optional[Tuple[str, float]] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        self._enabled = False
+        self._init_mixer()
+
+    def _init_mixer(self) -> None:
+        """Initialise the pygame mixer, falling back to the dummy driver if needed."""
         try:
             pygame.mixer.init()
+            self._enabled = True
+            return
         except Exception as exc:  # pragma: no cover - audio backend optional
             logger.warning("pygame mixer init failed: %s", exc)
 
+        if not os.environ.get("SDL_AUDIODRIVER"):
+            os.environ["SDL_AUDIODRIVER"] = "dummy"
+            try:
+                pygame.mixer.init()
+                self._enabled = True
+                logger.info("pygame mixer initialised with dummy audio driver; audio playback muted")
+                return
+            except Exception as exc:  # pragma: no cover - optional backend
+                logger.error("pygame mixer fallback to dummy driver failed: %s", exc)
+
+        logger.error("Audio playback disabled: pygame mixer is unavailable on this system")
+        self._enabled = False
+
     def enqueue_bilingual(self, th_text: str, en_text: str, pause_ms: int) -> None:
         if not th_text and not en_text:
+            return
+        if not self._enabled:
+            logger.debug("Skipping announcement because audio output is disabled")
             return
         now = time.monotonic()
         with self._lock:
@@ -51,10 +75,11 @@ class AudioWorker:
         self._queue.put(("", "", 0))
         if self._thread.is_alive():
             self._thread.join(timeout=1.5)
-        try:
-            pygame.mixer.quit()
-        except Exception:
-            pass
+        if self._enabled:
+            try:
+                pygame.mixer.quit()
+            except Exception:
+                pass
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -75,7 +100,7 @@ class AudioWorker:
                 logger.error("Audio worker error: %s", exc)
 
     def _play_segment(self, text: str, lang: str) -> None:
-        if not text:
+        if not text or not self._enabled:
             return
         filename = self._cache_path(text, lang)
         if not filename.exists():

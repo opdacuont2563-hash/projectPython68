@@ -158,7 +158,11 @@ def init_sheets():
         SHEETS_ENABLED = False
         _gspread_client = None
         _sheet = None
-        logger.warning("[Sheets] Disabled (reason: %s). Running without Sheets.", e)
+        message = f"[Sheets] Disabled (reason: {e}). Running without Sheets."
+        if "No valid service account credentials" in str(e):
+            logger.info(message)
+        else:
+            logger.warning(message)
 
 def sync_config_to_sheet():
     """อัปเดตชีต Config: ANNOUNCE_MIN (ถ้าเปิด Sheets เท่านั้น)"""
