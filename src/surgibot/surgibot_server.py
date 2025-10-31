@@ -38,6 +38,7 @@ from flask import Flask, request, jsonify
 from waitress import serve
 import sys
 import time  # ใช้จับเวลารอให้เสียงเล่นจนจบ
+import requests
 
 from .config import CONFIG
 from .logging_setup import get_logger
@@ -93,6 +94,41 @@ _sheet = None
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = CONFIG.google_sheet_id
 
+# NOTE: helper สำหรับ retry งานที่คุยกับ Google Sheets ให้ไม่ค้าง UI
+def _with_retry(fn, *args, retries: int = 3, delay: float = 0.7, backoff: float = 2.0, **kwargs):
+    attempt = 0
+    wait = max(0.0, delay)
+    while True:
+        try:
+            return fn(*args, **kwargs)
+        except (gspread.exceptions.APIError, requests.exceptions.RequestException, OSError) as exc:
+            attempt += 1
+            if attempt > retries:
+                logger.warning(
+                    "[Sheets] Operation %s failed after %d attempts: %s",
+                    getattr(fn, "__name__", repr(fn)),
+                    attempt,
+                    exc,
+                )
+                raise
+            logger.debug(
+                "[Sheets] transient error on %s (attempt %d/%d): %s",
+                getattr(fn, "__name__", repr(fn)),
+                attempt,
+                retries,
+                exc,
+            )
+            time.sleep(wait)
+            wait = wait * backoff if backoff > 0 else wait
+
+
+def _safe_error_message(exc: Exception) -> str:
+    msg = str(exc)
+    if "PRIVATE KEY" in msg.upper():
+        return "sensitive credential error"
+    return msg
+
+
 def _normalize_sa_info(raw: str | dict) -> dict:
     """รับ JSON string หรือ dict ของ Service Account แล้ว normalize private_key ให้ถูกฟอร์แมต"""
     if isinstance(raw, str):
@@ -117,21 +153,48 @@ def _load_service_account_credentials():
       2) ENV SURGIBOT_GCP_CREDENTIALS_FILE  (พาธไฟล์ .json)
       3) ENV SURGIBOT_EMBEDDED_CREDENTIALS_JSON (วาง JSON ไว้ใน ENV นี้)
     """
-    env_json = (CONFIG.gcp_credentials_json or "").strip()
-    env_file = (CONFIG.gcp_credentials_file or "").strip()
-    embedded = (CONFIG.embedded_credentials_json or "").strip()
-
     sa_info = None
-    if env_json:
-        sa_info = _normalize_sa_info(env_json)
-    elif env_file and Path(env_file).exists():
-        sa_info = _normalize_sa_info(Path(env_file).read_text(encoding="utf-8"))
-    elif embedded:
-        sa_info = _normalize_sa_info(embedded)
+    source = None
+
+    config_json = (CONFIG.gcp_credentials_json or "").strip()
+    if config_json:
+        sa_info = _normalize_sa_info(config_json)
+        source = "CONFIG_JSON"
     else:
+        env_json = os.getenv("SURGIBOT_GCP_CREDENTIALS_JSON", "").strip()
+        if env_json:
+            sa_info = _normalize_sa_info(env_json)
+            source = "ENV_JSON"
+
+    if sa_info is None:
+        config_file = (CONFIG.gcp_credentials_file or "").strip()
+        file_source = "CONFIG_FILE"
+        if not config_file:
+            config_file = os.getenv("SURGIBOT_GCP_CREDENTIALS_FILE", "").strip()
+            file_source = "ENV_FILE" if config_file else file_source
+        if config_file:
+            path = Path(config_file)
+            if path.exists():
+                sa_info = _normalize_sa_info(path.read_text(encoding="utf-8"))
+                source = file_source
+            else:
+                logger.debug("[Sheets] Credential file not found at %s", config_file)
+
+    if sa_info is None:
+        embedded = (CONFIG.embedded_credentials_json or "").strip()
+        embed_source = "CONFIG_EMBEDDED"
+        if not embedded:
+            embedded = os.getenv("SURGIBOT_EMBEDDED_CREDENTIALS_JSON", "").strip()
+            embed_source = "ENV_EMBEDDED" if embedded else embed_source
+        if embedded:
+            sa_info = _normalize_sa_info(embedded)
+            source = embed_source
+
+    if sa_info is None:
         payload = CONFIG.google_credentials_payload()
         if payload:
             sa_info = _normalize_sa_info(payload)
+            source = "CONFIG_PAYLOAD"
         else:
             raise RuntimeError(
                 "No valid service account credentials provided. "
@@ -142,6 +205,7 @@ def _load_service_account_credentials():
     if not (pk.startswith("-----BEGIN PRIVATE KEY-----") and "-----END PRIVATE KEY-----" in pk):
         raise ValueError("Invalid private_key PEM format. Please re-check your service account JSON.")
 
+    logger.debug("[Sheets] Using credentials source=%s", source or "UNKNOWN")
     creds = service_account.Credentials.from_service_account_info(sa_info).with_scopes(SCOPES)
     return creds
 
@@ -151,27 +215,33 @@ def init_sheets():
     try:
         creds = _load_service_account_credentials()
         _gspread_client = gspread.authorize(creds)
-        _sheet = _gspread_client.open_by_key(SPREADSHEET_ID).sheet1
+        spreadsheet = _with_retry(_gspread_client.open_by_key, SPREADSHEET_ID)
+        _sheet = spreadsheet.sheet1
         SHEETS_ENABLED = True
-        logger.info("[Sheets] Connected and enabled.")
+        logger.info("[Sheets] Connected and enabled (sheet=%s).", SPREADSHEET_ID)
     except Exception as e:
         SHEETS_ENABLED = False
         _gspread_client = None
         _sheet = None
-        logger.warning("[Sheets] Disabled (reason: %s). Running without Sheets.", e)
+        logger.info("[Sheets] Disabled (reason: %s). Running without Sheets.", _safe_error_message(e))
 
 def sync_config_to_sheet():
     """อัปเดตชีต Config: ANNOUNCE_MIN (ถ้าเปิด Sheets เท่านั้น)"""
     if not SHEETS_ENABLED:
         return
     try:
+        ss = _with_retry(_gspread_client.open_by_key, SPREADSHEET_ID)
         try:
-            cfg = _gspread_client.open_by_key(SPREADSHEET_ID).worksheet("Config")
+            cfg = _with_retry(ss.worksheet, "Config")
         except gspread.exceptions.WorksheetNotFound:
-            ss = _gspread_client.open_by_key(SPREADSHEET_ID)
-            cfg = ss.add_worksheet(title="Config", rows=10, cols=4)
-        cfg.clear()
-        cfg.update(values=[["ANNOUNCE_MIN", ANNOUNCE_MIN]], range_name="A1:B1")
+            cfg = _with_retry(ss.add_worksheet, title="Config", rows=10, cols=4)
+        _with_retry(cfg.clear)
+        _with_retry(
+            cfg.update,
+            "A1:B1",
+            [["ANNOUNCE_MIN", ANNOUNCE_MIN]],
+            value_input_option="RAW",
+        )
     except Exception as e:
         logger.warning("[Sheets] Config sync error: %s", e)
 
@@ -180,18 +250,18 @@ def _update_next_announce_to_sheet(next_dt: datetime):
     if not SHEETS_ENABLED:
         return
     try:
-        ss = _gspread_client.open_by_key(SPREADSHEET_ID)
+        ss = _with_retry(_gspread_client.open_by_key, SPREADSHEET_ID)
         try:
-            cfg = ss.worksheet("Config")
+            cfg = _with_retry(ss.worksheet, "Config")
         except gspread.exceptions.WorksheetNotFound:
-            cfg = ss.add_worksheet(title="Config", rows=10, cols=4)
+            cfg = _with_retry(ss.add_worksheet, title="Config", rows=10, cols=4)
 
         now_iso = datetime.now().replace(microsecond=0).isoformat()
         next_iso = next_dt.replace(microsecond=0).isoformat()
 
-        cfg.update(values=[["ANNOUNCE_MIN", ANNOUNCE_MIN]], range_name="A1:B1")
-        cfg.update(values=[["NEXT_ANNOUNCE_ISO", next_iso]], range_name="A2:B2")
-        cfg.update(values=[["SERVER_NOW_ISO", now_iso]], range_name="A3:B3")
+        _with_retry(cfg.update, "A1:B1", [["ANNOUNCE_MIN", ANNOUNCE_MIN]], value_input_option="RAW")
+        _with_retry(cfg.update, "A2:B2", [["NEXT_ANNOUNCE_ISO", next_iso]], value_input_option="RAW")
+        _with_retry(cfg.update, "A3:B3", [["SERVER_NOW_ISO", now_iso]], value_input_option="RAW")
     except Exception as e:
         logger.warning("[Sheets] update next announce error: %s", e)
 
@@ -499,29 +569,32 @@ class SurgeryStatusApp(tk.Frame):
         if not SHEETS_ENABLED:
             return
         try:
-            _sheet.clear()
-            _sheet.append_row(["ID(mask)", "PatientID", "Status", "StartTime", "ETA(min)", "ETA_Time"])
+            rows = [["ID(mask)", "PatientID", "Status", "StartTime", "ETA(min)", "ETA_Time"]]
             now_str = datetime.now().strftime("%H:%M")
             for patient_id, data in self.patient_data.items():
                 status = data.get("status", "")
-                start_time_str = data.get("timestamp").strftime("%H:%M") if data.get("timestamp") else ""
+                timestamp = data.get("timestamp")
+                start_time_str = timestamp.strftime("%H:%M") if timestamp else ""
                 eta_min = data.get("eta_minutes")
+                eta_cell = eta_min if isinstance(eta_min, int) else ""
                 eta_time_str = ""
                 if status == "กำลังพักฟื้น":
                     eta_time_str = now_str  # ETA ปัจจุบัน
-                    eta_min = ""
-                else:
-                    if isinstance(eta_min, int) and data.get("timestamp"):
-                        eta_dt = data["timestamp"] + timedelta(minutes=eta_min)
-                        eta_time_str = eta_dt.strftime("%H:%M")
-                _sheet.append_row([
+                    eta_cell = ""
+                elif isinstance(eta_min, int) and timestamp:
+                    eta_dt = timestamp + timedelta(minutes=eta_min)
+                    eta_time_str = eta_dt.strftime("%H:%M")
+                rows.append([
                     mask_hn(data.get("hn")) or data.get("id"),
                     patient_id,
                     status,
                     start_time_str,
-                    eta_min or "",
-                    eta_time_str
+                    eta_cell,
+                    eta_time_str,
                 ])
+            _with_retry(_sheet.clear)
+            _with_retry(_sheet.update, "A1", rows, value_input_option="RAW")
+            logger.debug("[Sheets] batch update rows=%d", max(0, len(rows) - 1))
         except Exception as e:
             logger.warning("[Sheets] Sync error: %s", e)
 
